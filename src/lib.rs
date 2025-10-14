@@ -580,6 +580,8 @@ define_entity_info!(BroadcastSet, {
 });
 
 #[derive(Debug, PartialEq, Eq, Clone)]
+/// Represents a broadcast set in the simulation, which can be a confirmed block
+/// or a set of transactions awaiting confirmation.
 enum BroadcastSetData {
     Block(BlockId),
     Transactions(Vec<TxId>),
@@ -1191,6 +1193,43 @@ impl<'a> Simulation {
         sim
     }
 
+    fn build_universe(&mut self) {
+        let mut wallets = self.wallet_data.clone();
+        let addresses = wallets
+            .iter()
+            .map(|w| self.new_address(w.id))
+            .collect::<Vec<_>>();
+
+        // For now we just mine a coinbase transaction for each wallet
+        let mut i = 0;
+        for (wallet, address) in wallets.iter_mut().zip(addresses.iter()) {
+            let broadcast_set = BroadcastSetHandleMut {
+                id: BroadcastSetId(i),
+                sim: self,
+            };
+            let coinbase_tx = broadcast_set
+                .construct_block_template(Weight::MAX_BLOCK)
+                .mine(*address, self);
+
+            wallet.own_transactions.push(coinbase_tx.coinbase_tx().id);
+
+            self.assert_invariants();
+            i += 1;
+        }
+
+        // In this universe we only have payment intent between the first (alice) and second (bob) wallet
+        // TODO: in the future payment obligations will be randomized between the wallet and their amounts, as well as deadlines
+        let payment = PaymentObligationData {
+            amount: Amount::from_int_btc(20),
+            from: wallets[0].id,
+            to: wallets[1].id,
+            deadline: 2, // TODO 102
+                         // TODO coinbase maturity
+        };
+        self.payment_data.push(payment);
+        self.assert_invariants();
+    }
+
     fn genesis_block(&self) -> BlockId {
         BlockId(0)
     }
@@ -1327,51 +1366,22 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let mut sim = SimulationBuilder::new_random(2, 10, 1).build();
-
+        let mut sim = SimulationBuilder::new(42, 2, 10, 1).build();
         sim.assert_invariants();
 
         let alice = WalletId(0);
         let bob = WalletId(1);
 
-        let alice_coinbase_addr = alice.with_mut(&mut sim).new_address();
-        sim.assert_invariants();
+        sim.build_universe();
 
-        // TODO sim.current_broadcast_set()
-        let initial_bx = BroadcastSetHandleMut {
-            id: BroadcastSetId(0),
-            sim: &mut sim,
-        };
-
-        let coinbase_tx = initial_bx
-            .construct_block_template(Weight::MAX_BLOCK)
-            .mine(alice_coinbase_addr, &mut sim)
-            .coinbase_tx()
-            .id;
-
-        sim.assert_invariants();
-
-        assert_eq!(alice.with(&sim).data().own_transactions, vec![coinbase_tx]);
-        assert_eq!(
-            alice.with(&sim).info().confirmed_utxos,
-            OrdSet::from_iter(coinbase_tx.with(&sim).outpoints())
-        );
-
-        // TODO coinbase maturity
-
-        let payment = PaymentObligationData {
-            amount: Amount::from_int_btc(20),
-            from: WalletId(0),
-            to: WalletId(1),
-            deadline: 2, // TODO 102
-        };
-        sim.assert_invariants();
+        let coinbase_tx = alice.with(&sim).data().own_transactions[0].with(&sim).id;
 
         let bob_payment_addr = bob.with_mut(&mut sim).new_address();
         sim.assert_invariants();
         let alice_change_addr = alice.with_mut(&mut sim).new_address();
         sim.assert_invariants();
 
+        let payment = sim.payment_data[0].clone();
         let target = Target {
             fee: TargetFee {
                 rate: bdk_coin_select::FeeRate::from_sat_per_vb(1.0),
@@ -1412,7 +1422,7 @@ mod tests {
             .id;
         sim.assert_invariants();
 
-        assert_eq!(spend, TxId(2));
+        assert_eq!(spend, TxId(3));
 
         assert_eq!(spend.with(&sim).info().weight, Weight::from_wu(688));
 
