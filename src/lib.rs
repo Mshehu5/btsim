@@ -157,6 +157,8 @@ impl SimulationBuilder {
             sim.new_wallet();
         }
 
+        sim.max_epochs = Epoch(self.max_epochs);
+
         sim
     }
 }
@@ -173,6 +175,7 @@ struct Simulation {
     // TODO mempools, = orderings / replacements of broadcast_sets
     block_data: Vec<BlockData>,
     current_epoch: Epoch,
+    max_epochs: Epoch,
 
     // secondary information (indexes)
     spends: OrdMap<Outpoint, OrdSet<TxId>>,
@@ -259,7 +262,12 @@ impl<'a> Simulation {
     }
 
     fn tick(&mut self) {
-        let payment_obligation = self.payment_data.pop().unwrap();
+        if self.payment_data.is_empty() {
+            self.current_epoch = Epoch(self.current_epoch.0 + 1);
+            return;
+        }
+
+        let payment_obligation = self.payment_data.pop().expect("checked above");
         let to_wallet_id = payment_obligation.to.with(self).clone().id;
         let from_wallet_id = payment_obligation.from.with_mut(self).clone().id;
 
@@ -306,6 +314,16 @@ impl<'a> Simulation {
         from_wallet.broadcast(std::iter::once(spend));
 
         self.current_epoch = Epoch(self.current_epoch.0 + 1);
+    }
+
+    fn run(&mut self) {
+        let max_epochs = self.max_epochs;
+        while self.current_epoch < max_epochs {
+            println!("Epoch {}", self.current_epoch.0);
+            self.tick();
+            // TODO: call this only in debug / testmode?
+            self.assert_invariants();
+        }
     }
 
     fn genesis_block(&self) -> BlockId {
@@ -456,7 +474,7 @@ mod tests {
 
         let coinbase_tx = alice.with(&sim).data().own_transactions[0].with(&sim).id;
 
-        sim.tick();
+        sim.run();
         sim.assert_invariants();
 
         let spend = alice.with_mut(&mut sim).data().own_transactions[1];
@@ -482,8 +500,6 @@ mod tests {
         );
 
         assert!(bob.with(&sim).info().received_transactions.contains(&spend));
-
-        println!("{:?}", sim);
     }
 
     #[test]
