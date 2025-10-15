@@ -4,7 +4,7 @@ use crate::{
 };
 use bdk_coin_select::{
     metrics::LowestFee, Candidate, ChangePolicy, CoinSelector, Drain, DrainWeights, Target,
-    TR_DUST_RELAY_MIN_VALUE, TR_KEYSPEND_TXIN_WEIGHT,
+    TargetFee, TargetOutputs, TR_DUST_RELAY_MIN_VALUE, TR_KEYSPEND_TXIN_WEIGHT,
 };
 use bitcoin::{transaction::InputWeightPrediction, Amount};
 use im::{OrdSet, Vector};
@@ -32,7 +32,6 @@ define_entity_mut_updatable!(
     }
 );
 
-// TODO WalletHandle
 impl<'a> WalletHandle<'a> {
     pub(crate) fn data(&self) -> &'a WalletData {
         &self.sim.wallet_data[self.id.0]
@@ -139,6 +138,54 @@ impl<'a> WalletHandleMut<'a> {
         id
     }
 
+    pub(crate) fn fufill_payment_obligation(&mut self) -> Option<TxId> {
+        let info = self.info();
+        let obligation = info.payment_obligations.iter().next();
+        if let Some(obligation) = obligation {
+            let obligation = obligation.with(self.sim).clone();
+            let to_addr = obligation.data().to;
+            let amount = obligation.data().amount.to_sat();
+            let target = Target {
+                fee: TargetFee {
+                    rate: bdk_coin_select::FeeRate::from_sat_per_vb(1.0),
+                    replace: None,
+                },
+                outputs: TargetOutputs {
+                    value_sum: amount,
+                    weight_sum: 34, // TODO use payment.to to derive an address, payment.into() ?
+                    n_outputs: 1,
+                },
+            };
+            let long_term_feerate = bitcoin::FeeRate::from_sat_per_vb(10).expect("valid fee rate");
+
+            let (selected_coins, drain) = self.select_coins(target, long_term_feerate);
+            let change_addr = self.new_address();
+            let spend = self
+                .new_tx(|tx, _| {
+                    tx.inputs = selected_coins
+                        .map(|o| Input {
+                            outpoint: o.outpoint,
+                        })
+                        .collect();
+
+                    tx.outputs = vec![
+                        Output {
+                            amount: Amount::from_sat(amount),
+                            address_id: to_addr,
+                        },
+                        Output {
+                            amount: Amount::from_sat(drain.value),
+                            address_id: change_addr,
+                        },
+                    ];
+                })
+                .id;
+
+            return Some(spend);
+        }
+        None
+    }
+
     pub(crate) fn new_tx<F>(&mut self, build: F) -> TxHandle
     where
         F: FnOnce(&mut TxData, &Simulation),
@@ -170,16 +217,22 @@ impl<'a> WalletHandleMut<'a> {
 define_entity!(
     PaymentObligation,
     {
-        pub(crate) deadline: Epoch, // block height? time step?
+        pub(crate) deadline: Epoch,
         pub(crate) amount: Amount,
         pub(crate) from: WalletId,
-        pub(crate) to: WalletId,
+        pub(crate) to: AddressId,
     },
     {
         // TODO coin selection strategy agnostic (pessimal?) spendable balance lower
         // bound
     }
 );
+
+impl<'a> PaymentObligationHandle<'a> {
+    pub(crate) fn data(&self) -> &'a PaymentObligationData {
+        &self.sim.payment_data[self.id.0]
+    }
+}
 
 define_entity!(Address, {
     pub(crate) wallet_id: WalletId,

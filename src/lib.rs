@@ -257,10 +257,7 @@ impl<'a> Simulation {
             i += 1;
         }
 
-        // In this universe we only have payment intent between the first (alice) and second (bob) wallet
-        // TODO: in the future payment obligations will be randomized between the wallet and their amounts, as well as deadlines
-        let payment = self.new_payment_obligation();
-        self.payment_data.push(payment);
+        self.new_payment_obligation();
         self.assert_invariants();
     }
 
@@ -268,56 +265,22 @@ impl<'a> Simulation {
         if self.payment_data.is_empty() {
             println!("No payment obligations, skipping epoch");
             self.current_epoch = Epoch(self.current_epoch.0 + 1);
+            // Lets create a random payment obligation
+            self.new_payment_obligation();
+            self.assert_invariants();
             return;
         }
 
-        let payment_obligation = self.payment_data.pop().expect("checked above");
-        let to_wallet_id = payment_obligation.to.with(self).clone().id;
-        let from_wallet_id = payment_obligation.from.with_mut(self).clone().id;
-
-        let change_addr = self.new_address(from_wallet_id);
-        let to_addr = self.new_address(to_wallet_id);
-
-        let target = Target {
-            fee: TargetFee {
-                rate: bdk_coin_select::FeeRate::from_sat_per_vb(1.0),
-                replace: None,
-            },
-            outputs: TargetOutputs {
-                value_sum: payment_obligation.amount.to_sat(),
-                weight_sum: 34, // TODO use payment.to to derive an address, payment.into() ?
-                n_outputs: 1,
-            },
-        };
-
-        let long_term_feerate = bitcoin::FeeRate::from_sat_per_vb(10).unwrap();
-        let mut from_wallet = from_wallet_id.with_mut(self);
-        let (selected_coins, drain) = from_wallet.select_coins(target, long_term_feerate);
-
+        let payment_obligation = self.payment_data.first().expect("checked above").clone();
+        let mut from_wallet = payment_obligation.from.with_mut(self);
         let spend = from_wallet
-            .new_tx(|tx, _| {
-                tx.inputs = selected_coins
-                    .map(|o| Input {
-                        outpoint: o.outpoint,
-                    })
-                    .collect();
-
-                tx.outputs = vec![
-                    Output {
-                        amount: payment_obligation.amount,
-                        address_id: to_addr,
-                    },
-                    Output {
-                        amount: Amount::from_sat(drain.value),
-                        address_id: change_addr,
-                    },
-                ];
-            })
-            .id;
+            .fufill_payment_obligation()
+            .expect("Payment obligation should have atleast one value");
 
         from_wallet.broadcast(std::iter::once(spend));
-
         self.current_epoch = Epoch(self.current_epoch.0 + 1);
+
+        self.assert_invariants();
     }
 
     fn run(&mut self) {
@@ -344,7 +307,12 @@ impl<'a> Simulation {
         id.with(&self)
     }
 
-    fn new_payment_obligation(&mut self) -> PaymentObligationData {
+    /// Creates a random payment obligation between two wallets.
+    fn new_payment_obligation(&mut self) {
+        if self.max_epochs.0 - self.current_epoch.0 < 2 {
+            // Not enough epochs left to create a payment obligation
+            return;
+        }
         let max_wallets = self.wallet_data.len();
         let from = self.prng.gen_range(0..max_wallets);
         let mut to = self.prng.gen_range(0..max_wallets);
@@ -353,13 +321,27 @@ impl<'a> Simulation {
         }
         let amount = self.prng.gen_range(1..20);
         let deadline = self.prng.gen_range(self.current_epoch.0..self.max_epochs.0);
-
-        PaymentObligationData {
+        let to_addr = self.new_address(WalletId(to));
+        // First insert payment obligation into simulation
+        self.payment_data.push(PaymentObligationData {
             amount: Amount::from_int_btc(amount),
             from: WalletId(from),
-            to: WalletId(to),
+            to: to_addr,
             deadline: Epoch(deadline),
-        }
+        });
+        let payment_obligation_id = PaymentObligationId(self.payment_data.len() - 1);
+
+        // Then insert into to_wallet's expected payments
+        let last_wallet_info_id = self.wallet_data[to].last_wallet_info_id;
+        self.wallet_info[last_wallet_info_id.0]
+            .expected_payments
+            .insert(payment_obligation_id);
+
+        // Then insert into from_wallet's payment obligations
+        let last_wallet_info_id = self.wallet_data[from].last_wallet_info_id;
+        self.wallet_info[last_wallet_info_id.0]
+            .payment_obligations
+            .insert(payment_obligation_id);
     }
 
     fn new_wallet(&mut self) -> WalletId {
@@ -470,6 +452,9 @@ impl<'a> Simulation {
             );
         });
 
+        // TODO: assert that expected payments and payment obligations met
+        // TODO: assert that for each payment obligation, the from wallet has the expected payment
+
         // TODO for all wallets, ensure their confirmed and unconfirmed utxos form a partition (their intersections are empty and their union is describes the corresponding block info and broadcast state)
         // take union and compare size to sum of sizes, and check equality with global structures
     }
@@ -521,7 +506,7 @@ impl std::fmt::Display for Simulation {
         writeln!(f, "\nPayment Obligations: {}", self.payment_data.len())?;
         for (i, payment) in self.payment_data.iter().enumerate() {
             writeln!(f, "\nPayment {}:", i)?;
-            writeln!(f, "  Amount: {} BTC", payment.amount)?;
+            writeln!(f, "  Amount: {}", payment.amount)?;
             writeln!(f, "  From: Wallet {}", payment.from.0)?;
             writeln!(f, "  To: Wallet {}", payment.to.0)?;
             writeln!(f, "  Deadline: Epoch {}", payment.deadline.0)?;
@@ -547,14 +532,7 @@ mod tests {
     fn test_universe() {
         let mut sim = SimulationBuilder::new(42, 2, 10, 1).build();
         sim.assert_invariants();
-
-        let alice = WalletId(0);
-        let bob = WalletId(1);
-
         sim.build_universe();
-
-        let coinbase_tx = alice.with(&sim).data().own_transactions[0].with(&sim).id;
-
         sim.run();
         sim.assert_invariants();
 
@@ -625,7 +603,7 @@ mod tests {
         let payment = PaymentObligationData {
             amount: Amount::from_int_btc(20),
             from: WalletId(0),
-            to: WalletId(1),
+            to: bob.with_mut(&mut sim).new_address(),
             deadline: Epoch(2), // TODO 102
         };
         sim.assert_invariants();
