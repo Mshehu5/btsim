@@ -151,43 +151,6 @@ impl SimulationBuilder {
     }
 
     fn build(self) -> Simulation {
-        let mut sim = Simulation::new();
-
-        for _ in 0..self.num_wallets {
-            sim.new_wallet();
-        }
-
-        sim.max_epochs = Epoch(self.max_epochs);
-
-        sim
-    }
-}
-
-/// all entities are numbered sequentially
-#[derive(Debug, PartialEq, Eq)]
-struct Simulation {
-    // primary information
-    wallet_data: Vec<WalletData>,
-    payment_data: Vec<PaymentObligationData>,
-    address_data: Vec<AddressData>,
-    tx_data: Vec<TxData>, // all are implicitly broadcast for now
-    broadcast_set_data: Vec<BroadcastSetData>,
-    // TODO mempools, = orderings / replacements of broadcast_sets
-    block_data: Vec<BlockData>,
-    current_epoch: Epoch,
-    max_epochs: Epoch,
-    prng: ChaChaRng,
-
-    // secondary information (indexes)
-    spends: OrdMap<Outpoint, OrdSet<TxId>>,
-    wallet_info: Vec<WalletInfo>,
-    block_info: Vec<BlockInfo>,
-    tx_info: Vec<TxInfo>,
-    broadcast_set_info: Vec<BroadcastSetInfo>,
-}
-
-impl<'a> Simulation {
-    fn new() -> Self {
         let mut sim = Simulation {
             wallet_data: Vec::new(),
             payment_data: Vec::new(),
@@ -204,6 +167,8 @@ impl<'a> Simulation {
             tx_info: Vec::new(),
             broadcast_set_info: Vec::new(),
         };
+        sim.max_epochs = Epoch(self.max_epochs);
+        sim.prng = self.prng;
 
         // genesis block has empty coinbase
         sim.tx_data.push(TxData::default());
@@ -235,9 +200,38 @@ impl<'a> Simulation {
             invalidated_txs: OrdSet::default(),
         });
 
+        for _ in 0..self.num_wallets {
+            sim.new_wallet();
+        }
+
         sim
     }
+}
 
+/// all entities are numbered sequentially
+#[derive(Debug, PartialEq, Eq)]
+struct Simulation {
+    // primary information
+    wallet_data: Vec<WalletData>,
+    payment_data: Vec<PaymentObligationData>,
+    address_data: Vec<AddressData>,
+    tx_data: Vec<TxData>, // all are implicitly broadcast for now
+    broadcast_set_data: Vec<BroadcastSetData>,
+    // TODO mempools, = orderings / replacements of broadcast_sets
+    block_data: Vec<BlockData>,
+    current_epoch: Epoch,
+    max_epochs: Epoch,
+    prng: ChaChaRng,
+
+    // secondary information (indexes)
+    spends: OrdMap<Outpoint, OrdSet<TxId>>,
+    wallet_info: Vec<WalletInfo>,
+    block_info: Vec<BlockInfo>,
+    tx_info: Vec<TxInfo>,
+    broadcast_set_info: Vec<BroadcastSetInfo>,
+}
+
+impl<'a> Simulation {
     fn build_universe(&mut self) {
         let mut wallets = self.wallet_data.clone();
         let addresses = wallets
@@ -518,7 +512,7 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let mut sim = Simulation::new();
+        let mut sim = SimulationBuilder::new(42, 2, 10, 1).build();
 
         sim.assert_invariants();
 
