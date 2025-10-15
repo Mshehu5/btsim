@@ -475,6 +475,65 @@ impl<'a> Simulation {
     }
 }
 
+impl std::fmt::Display for Simulation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "=== Simulation State ===")?;
+        writeln!(f, "Current Epoch: {}", self.current_epoch.0)?;
+        writeln!(f, "Max Epochs: {}", self.max_epochs.0)?;
+        writeln!(f, "\nWallets: {}", self.wallet_data.len())?;
+
+        for (i, wallet) in self.wallet_data.iter().enumerate() {
+            writeln!(f, "\nWallet {}:", i)?;
+            writeln!(f, "  Own Transactions: {:?}", wallet.own_transactions)?;
+            writeln!(f, "  Addresses: {:?}", wallet.addresses)?;
+            writeln!(
+                f,
+                "  Broadcast Transactions: {:?}",
+                self.wallet_info[wallet.last_wallet_info_id.0].broadcast_transactions
+            )?;
+            writeln!(
+                f,
+                "  Received Transactions: {:?}",
+                self.wallet_info[wallet.last_wallet_info_id.0].received_transactions
+            )?;
+            writeln!(
+                f,
+                "  Unconfirmed Transactions: {:?}",
+                self.wallet_info[wallet.last_wallet_info_id.0].unconfirmed_transactions
+            )?;
+            writeln!(
+                f,
+                "  Confirmed UTXOs: {:?}",
+                self.wallet_info[wallet.last_wallet_info_id.0].confirmed_utxos
+            )?;
+            writeln!(
+                f,
+                "  Unconfirmed UTXOs: {:?}",
+                self.wallet_info[wallet.last_wallet_info_id.0].unconfirmed_txos
+            )?;
+            writeln!(
+                f,
+                "  Unconfirmed Spends: {:?}",
+                self.wallet_info[wallet.last_wallet_info_id.0].unconfirmed_spends
+            )?;
+        }
+
+        writeln!(f, "\nPayment Obligations: {}", self.payment_data.len())?;
+        for (i, payment) in self.payment_data.iter().enumerate() {
+            writeln!(f, "\nPayment {}:", i)?;
+            writeln!(f, "  Amount: {} BTC", payment.amount)?;
+            writeln!(f, "  From: Wallet {}", payment.from.0)?;
+            writeln!(f, "  To: Wallet {}", payment.to.0)?;
+            writeln!(f, "  Deadline: Epoch {}", payment.deadline.0)?;
+        }
+
+        writeln!(f, "\nBlocks: {}", self.block_data.len())?;
+        writeln!(f, "Broadcast Sets: {}", self.broadcast_set_data.len())?;
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bdk_coin_select::{Target, TargetFee, TargetOutputs};
@@ -498,6 +557,8 @@ mod tests {
 
         sim.run();
         sim.assert_invariants();
+
+        println!("{}", sim);
 
         // TODO: re-enable these assertions
         // let spend = alice.with_mut(&mut sim).data().own_transactions[1];
