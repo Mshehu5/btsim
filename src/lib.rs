@@ -278,7 +278,9 @@ impl<'a> Simulation {
             .fufill_payment_obligation()
             .expect("Payment obligation should have atleast one value");
 
-        from_wallet.broadcast(std::iter::once(spend));
+        let bset = from_wallet.broadcast(std::iter::once(spend));
+        bset.construct_block_template(Weight::MAX_BLOCK)
+            .mine(payment_obligation.to, self);
         self.current_epoch = Epoch(self.current_epoch.0 + 1);
 
         self.assert_invariants();
