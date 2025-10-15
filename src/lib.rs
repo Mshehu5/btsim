@@ -236,7 +236,7 @@ impl<'a> Simulation {
         let mut wallets = self.wallet_data.clone();
         let addresses = wallets
             .iter()
-            .map(|w| self.new_address(w.id))
+            .map(|w| w.id.with_mut(self).new_address())
             .collect::<Vec<_>>();
 
         // For now we just mine a coinbase transaction for each wallet
@@ -321,7 +321,7 @@ impl<'a> Simulation {
         }
         let amount = self.prng.gen_range(1..20);
         let deadline = self.prng.gen_range(self.current_epoch.0..self.max_epochs.0);
-        let to_addr = self.new_address(WalletId(to));
+        let to_addr = WalletId(to).with_mut(self).new_address();
         // First insert payment obligation into simulation
         self.payment_data.push(PaymentObligationData {
             amount: Amount::from_int_btc(amount),
@@ -366,13 +366,6 @@ impl<'a> Simulation {
             addresses: Vec::default(),
             own_transactions: Vec::default(),
         });
-        id
-    }
-
-    // TODO move to wallet impl?
-    fn new_address(&mut self, owner: WalletId) -> AddressId {
-        let id = AddressId(self.address_data.len());
-        self.address_data.push(AddressData { wallet_id: owner });
         id
     }
 

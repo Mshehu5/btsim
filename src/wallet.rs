@@ -133,8 +133,11 @@ impl<'a> WalletHandleMut<'a> {
     }
 
     pub(crate) fn new_address(&mut self) -> AddressId {
-        let id = self.sim.new_address(self.id);
+        let id = AddressId(self.sim.address_data.len());
         self.sim.wallet_data[self.id.0].addresses.push(id);
+        self.sim
+            .address_data
+            .push(AddressData { wallet_id: self.id });
         id
     }
 
