@@ -164,7 +164,7 @@ impl SimulationBuilder {
 }
 
 /// all entities are numbered sequentially
-#[derive(Debug, PartialEq, Eq, Default)] // TODO remove Default
+#[derive(Debug, PartialEq, Eq)]
 struct Simulation {
     // primary information
     wallet_data: Vec<WalletData>,
@@ -176,6 +176,7 @@ struct Simulation {
     block_data: Vec<BlockData>,
     current_epoch: Epoch,
     max_epochs: Epoch,
+    prng: ChaChaRng,
 
     // secondary information (indexes)
     spends: OrdMap<Outpoint, OrdSet<TxId>>,
@@ -187,7 +188,22 @@ struct Simulation {
 
 impl<'a> Simulation {
     fn new() -> Self {
-        let mut sim = Simulation::default();
+        let mut sim = Simulation {
+            wallet_data: Vec::new(),
+            payment_data: Vec::new(),
+            address_data: Vec::new(),
+            tx_data: Vec::new(),
+            broadcast_set_data: Vec::new(),
+            block_data: Vec::new(),
+            current_epoch: Epoch(0),
+            max_epochs: Epoch(0),
+            prng: ChaChaRng::from_rng(rand::thread_rng()).unwrap(),
+            spends: OrdMap::new(),
+            wallet_info: Vec::new(),
+            block_info: Vec::new(),
+            tx_info: Vec::new(),
+            broadcast_set_info: Vec::new(),
+        };
 
         // genesis block has empty coinbase
         sim.tx_data.push(TxData::default());
@@ -218,8 +234,6 @@ impl<'a> Simulation {
             unconfirmed_txs: OrdSet::default(),
             invalidated_txs: OrdSet::default(),
         });
-
-        sim.current_epoch = Epoch(0);
 
         sim
     }
