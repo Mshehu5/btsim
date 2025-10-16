@@ -1,5 +1,6 @@
 use crate::{
     blocks::{BroadcastSetHandleMut, BroadcastSetId},
+    message::{MessageData, MessageId},
     Epoch, Simulation,
 };
 use bdk_coin_select::{
@@ -18,6 +19,7 @@ define_entity_mut_updatable!(
         pub(crate) addresses: Vec<AddressId>,         // TODO split into internal/external?
         pub(crate) own_transactions: Vec<TxId>,       // transactions originating from this wallet
         pub(crate) last_wallet_info_id: WalletInfoId, // Monotone
+        pub(crate) seen_messages: OrdSet<MessageId>,
     },
     {
         pub(crate) broadcast_set_id: BroadcastSetId,
@@ -139,6 +141,16 @@ impl<'a> WalletHandleMut<'a> {
             .address_data
             .push(AddressData { wallet_id: self.id });
         id
+    }
+
+    pub(crate) fn handle_message(&mut self, message: MessageData) {
+        if message.to == self.id {
+            // TODO: depending on message type, do something
+            self.sim.wallet_data[self.id.0]
+                .seen_messages
+                .insert(message.id);
+        }
+        // TODO: else panic? something is wrong with the simulation?
     }
 
     pub(crate) fn fufill_payment_obligation(

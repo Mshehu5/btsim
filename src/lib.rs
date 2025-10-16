@@ -9,6 +9,7 @@ use crate::{
         BlockData, BlockHandle, BlockId, BlockInfo, BroadcastSetData, BroadcastSetHandleMut,
         BroadcastSetId, BroadcastSetInfo,
     },
+    message::{MessageData, MessageId},
     transaction::{Outpoint, TxData, TxHandle, TxId, TxInfo},
     wallet::{
         AddressData, AddressId, PaymentObligationData, PaymentObligationId, WalletData, WalletId,
@@ -19,6 +20,7 @@ use crate::{
 #[macro_use]
 mod macros;
 mod blocks;
+mod message;
 mod transaction;
 mod wallet;
 
@@ -199,8 +201,8 @@ impl SimulationBuilder {
             block_info: Vec::new(),
             tx_info: Vec::new(),
             broadcast_set_info: Vec::new(),
+            messages: Vec::new(),
         };
-        println!("Peer graph: {:?}", sim.peer_graph);
         sim.max_epochs = Epoch(self.max_epochs);
         sim.prng = self.prng;
 
@@ -261,6 +263,7 @@ struct Simulation {
     block_interval: usize,
     prng: ChaChaRng,
     peer_graph: PeerGraph,
+    messages: Vec<MessageData>,
 
     // secondary information (indexes)
     spends: OrdMap<Outpoint, OrdSet<TxId>>,
@@ -303,6 +306,11 @@ impl<'a> Simulation {
 
     fn tick(&mut self) {
         let payments = self.payment_data.clone();
+        let messages = self.messages.clone();
+        for message in messages.iter() {
+            message.to.with_mut(self).handle_message(message.clone());
+        }
+
         for (i, payment_obligation) in payments.iter().enumerate() {
             let mut from_wallet = payment_obligation.from.with_mut(self);
             let spend = from_wallet.fufill_payment_obligation(PaymentObligationId(i));
@@ -409,6 +417,7 @@ impl<'a> Simulation {
             last_wallet_info_id,
             addresses: Vec::default(),
             own_transactions: Vec::default(),
+            seen_messages: OrdSet::<MessageId>::default(),
         });
         id
     }
@@ -551,6 +560,13 @@ impl std::fmt::Display for Simulation {
             writeln!(f, "  From: Wallet {}", payment.from.0)?;
             writeln!(f, "  To: Address {}", payment.to.0)?;
             writeln!(f, "  Deadline: Epoch {}", payment.deadline.0)?;
+        }
+
+        writeln!(f, "\nPeer Messages: {}", self.messages.len())?;
+        for (i, message) in self.messages.iter().enumerate() {
+            writeln!(f, "\nMessage {}:", i)?;
+            writeln!(f, "  From: Wallet {}", message.from.0)?;
+            writeln!(f, "  To: Wallet {}", message.to.0)?;
         }
 
         writeln!(f, "\nBlocks: {}", self.block_data.len())?;
