@@ -129,6 +129,7 @@ impl PartialEq for PeerGraph {
 impl Eq for PeerGraph {}
 
 /// Wrapper type for timestep index
+// TODO: rename to Timestep
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Default)]
 pub(crate) struct Epoch(usize);
 
@@ -236,12 +237,12 @@ impl SimulationBuilder {
             invalidated_txs: OrdSet::default(),
         });
 
+        // First wallet represents the "miners"
+        sim.new_wallet();
+
         for _ in 0..self.num_wallets {
             sim.new_wallet();
         }
-
-        // Create one more wallet to simulate the "miners"
-        sim.new_wallet();
 
         sim
     }
@@ -306,17 +307,19 @@ impl<'a> Simulation {
     }
 
     fn tick(&mut self) {
-        let payments = self.payment_data.clone();
         let messages = self.messages.clone();
         for message in messages.iter() {
             message.to.with_mut(self).handle_message(message.clone());
+            // TODO: handle broadcast messages
         }
 
-        for (i, payment_obligation) in payments.iter().enumerate() {
-            let mut from_wallet = payment_obligation.from.with_mut(self);
-            let spend = from_wallet.fufill_payment_obligation(PaymentObligationId(i));
-
-            from_wallet.broadcast(std::iter::once(spend));
+        let wallet_ids = self.wallet_data.iter().map(|w| w.id).collect::<Vec<_>>();
+        // Skip the first wallet, which is the "miner"
+        for wallet_id in wallet_ids.iter() {
+            if let Some(spend) = wallet_id.with_mut(self).handle_payment_obligations() {
+                println!("Broadcasting spend: {:?}", spend);
+                wallet_id.with_mut(self).broadcast(std::iter::once(spend));
+            }
         }
 
         if self.current_epoch.0 % self.block_interval == 0 {
@@ -347,9 +350,9 @@ impl<'a> Simulation {
         BlockId(0)
     }
 
-    fn miner_address(&self) -> AddressId {
-        // The "miners" wallet is the last wallet in the simulation
-        AddressId(self.wallet_data.len() - 1)
+    fn miner_address(&mut self) -> AddressId {
+        let miner = self.wallet_data[0].id;
+        miner.with_mut(self).new_address()
     }
 
     // TODO remove
@@ -363,26 +366,27 @@ impl<'a> Simulation {
             // Not enough epochs left to create a payment obligation
             return;
         }
-        // The last wallet is the "miner"
         let max_wallets = self.wallet_data.len() - 1;
-        let from = self.prng.gen_range(0..max_wallets);
-        let mut to = self.prng.gen_range(0..max_wallets);
+        let from = self.prng.gen_range(0..=max_wallets);
+        let mut to = self.prng.gen_range(0..=max_wallets);
         if to == from {
             to = (to + 1) % max_wallets;
         }
+        // TODO: should be a configurable or dependent on the balance of each wallet?
         let amount = self.prng.gen_range(1..5);
         let deadline = self
             .prng
             .gen_range(self.current_epoch.0 + 1..self.max_epochs.0);
-        let to_addr = WalletId(to).with_mut(self).new_address();
+        let to_wallet = WalletId(to);
         // First insert payment obligation into simulation
+        let payment_obligation_id = PaymentObligationId(self.payment_data.len());
         self.payment_data.push(PaymentObligationData {
+            id: payment_obligation_id,
             amount: Amount::from_int_btc(amount),
             from: WalletId(from),
-            to: to_addr,
+            to: to_wallet,
             deadline: Epoch(deadline),
         });
-        let payment_obligation_id = PaymentObligationId(self.payment_data.len() - 1);
 
         // Then insert into to_wallet's expected payments
         let last_wallet_info_id = self.wallet_data[to].last_wallet_info_id;
@@ -419,6 +423,7 @@ impl<'a> Simulation {
             addresses: Vec::default(),
             own_transactions: Vec::default(),
             seen_messages: OrdSet::<MessageId>::default(),
+            handled_payment_obligations: OrdSet::<PaymentObligationId>::default(),
         });
         id
     }
@@ -550,11 +555,7 @@ impl std::fmt::Display for Simulation {
             )?;
         }
 
-        writeln!(
-            f,
-            "\nUnfulfilled Payment Obligations: {}",
-            self.payment_data.len()
-        )?;
+        writeln!(f, "\nPayment Obligations: {}", self.payment_data.len())?;
         for (i, payment) in self.payment_data.iter().enumerate() {
             writeln!(f, "\nPayment {}:", i)?;
             writeln!(f, "  Amount: {}", payment.amount)?;
@@ -568,6 +569,7 @@ impl std::fmt::Display for Simulation {
             writeln!(f, "\nMessage {}:", i)?;
             writeln!(f, "  From: Wallet {}", message.from.0)?;
             writeln!(f, "  To: Wallet {}", message.to.0)?;
+            writeln!(f, "  Message Type: {:?}", message.message)?;
         }
 
         writeln!(f, "\nBlocks: {}", self.block_data.len())?;
@@ -659,9 +661,10 @@ mod tests {
         // TODO coinbase maturity
 
         let payment = PaymentObligationData {
+            id: PaymentObligationId(0),
             amount: Amount::from_int_btc(20),
             from: WalletId(0),
-            to: bob.with_mut(&mut sim).new_address(),
+            to: bob,
             deadline: Epoch(2), // TODO 102
         };
         sim.assert_invariants();

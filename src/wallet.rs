@@ -20,6 +20,7 @@ define_entity_mut_updatable!(
         pub(crate) own_transactions: Vec<TxId>,       // transactions originating from this wallet
         pub(crate) last_wallet_info_id: WalletInfoId, // Monotone
         pub(crate) seen_messages: OrdSet<MessageId>,
+        pub(crate) handled_payment_obligations: OrdSet<PaymentObligationId>,
     },
     {
         pub(crate) broadcast_set_id: BroadcastSetId,
@@ -156,11 +157,11 @@ impl<'a> WalletHandleMut<'a> {
     /// stateless utility function to construct a transaction for a given payment obligation
     fn construct_payment_transaction(
         &self,
-        obligation: PaymentObligationHandle<'a>,
+        obligation: PaymentObligationData,
         change_addr: AddressId,
+        to_address: AddressId,
     ) -> TxData {
-        let to_addr = obligation.data().to;
-        let amount = obligation.data().amount.to_sat();
+        let amount = obligation.amount.to_sat();
         let target = Target {
             fee: TargetFee {
                 rate: bdk_coin_select::FeeRate::from_sat_per_vb(1.0),
@@ -184,7 +185,7 @@ impl<'a> WalletHandleMut<'a> {
         tx.outputs = vec![
             Output {
                 amount: Amount::from_sat(amount),
-                address_id: to_addr,
+                address_id: to_address,
             },
             Output {
                 amount: Amount::from_sat(drain.value),
@@ -194,27 +195,40 @@ impl<'a> WalletHandleMut<'a> {
         tx
     }
 
-    pub(crate) fn fufill_payment_obligation(
-        &mut self,
-        payment_obligation: PaymentObligationId,
-    ) -> TxId {
+    pub(crate) fn handle_payment_obligations(&mut self) -> Option<TxId> {
+        let payment_obligations = self.info().payment_obligations.clone();
+        // Filter the ones we have handled
+        let payment_obligations =
+            payment_obligations.difference(self.data().handled_payment_obligations.clone());
+
+        if payment_obligations.is_empty() {
+            return None;
+        }
+        let payment_obligation_id = payment_obligations.iter().next().unwrap();
+        let payment_obligation = payment_obligation_id.with(self.sim).data().clone();
         let change_addr = self.new_address();
+        let to_wallet = payment_obligation.to;
+        let to_address = to_wallet.with_mut(self.sim).new_address();
+        let tx_template =
+            self.construct_payment_transaction(payment_obligation.clone(), change_addr, to_address);
+
+        let tx_id = self.spend_tx(tx_template);
+        self.data_mut()
+            .handled_payment_obligations
+            .insert(*payment_obligation_id);
+        return Some(tx_id);
+    }
+
+    // TODO: refactor this? Do we event need this?
+    pub(crate) fn spend_tx(&mut self, txdata: TxData) -> TxId {
         // TODO: assert this is my obligation
-        let obligation = payment_obligation.with(self.sim).clone();
-        let tx_template = self.construct_payment_transaction(obligation, change_addr);
         let spend = self
             .new_tx(|tx, _| {
-                tx.inputs = tx_template.inputs;
-                tx.outputs = tx_template.outputs;
+                tx.inputs = txdata.inputs;
+                tx.outputs = txdata.outputs;
             })
             .id;
 
-        // TODO: should this be done after broadcast / confirmation?
-        self.sim.payment_data.remove(payment_obligation.0);
-        self.sim.wallet_info[self.id.0]
-            .payment_obligations
-            .remove(&payment_obligation);
-        // TODO: remove from receiver's expected_payments
         spend
     }
 
@@ -249,10 +263,11 @@ impl<'a> WalletHandleMut<'a> {
 define_entity!(
     PaymentObligation,
     {
+        pub(crate) id: PaymentObligationId,
         pub(crate) deadline: Epoch,
         pub(crate) amount: Amount,
         pub(crate) from: WalletId,
-        pub(crate) to: AddressId,
+        pub(crate) to: WalletId,
     },
     {
         // TODO coin selection strategy agnostic (pessimal?) spendable balance lower
