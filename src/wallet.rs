@@ -153,12 +153,12 @@ impl<'a> WalletHandleMut<'a> {
         // TODO: else panic? something is wrong with the simulation?
     }
 
-    pub(crate) fn fufill_payment_obligation(
-        &mut self,
-        payment_obligation: PaymentObligationId,
-    ) -> TxId {
-        // TODO: assert this is my obligation
-        let obligation = payment_obligation.with(self.sim).clone();
+    /// stateless utility function to construct a transaction for a given payment obligation
+    fn construct_payment_transaction(
+        &self,
+        obligation: PaymentObligationHandle<'a>,
+        change_addr: AddressId,
+    ) -> TxData {
         let to_addr = obligation.data().to;
         let amount = obligation.data().amount.to_sat();
         let target = Target {
@@ -175,25 +175,37 @@ impl<'a> WalletHandleMut<'a> {
         let long_term_feerate = bitcoin::FeeRate::from_sat_per_vb(10).expect("valid fee rate");
 
         let (selected_coins, drain) = self.select_coins(target, long_term_feerate);
+        let mut tx = TxData::default();
+        tx.inputs = selected_coins
+            .map(|o| Input {
+                outpoint: o.outpoint,
+            })
+            .collect();
+        tx.outputs = vec![
+            Output {
+                amount: Amount::from_sat(amount),
+                address_id: to_addr,
+            },
+            Output {
+                amount: Amount::from_sat(drain.value),
+                address_id: change_addr,
+            },
+        ];
+        tx
+    }
+
+    pub(crate) fn fufill_payment_obligation(
+        &mut self,
+        payment_obligation: PaymentObligationId,
+    ) -> TxId {
         let change_addr = self.new_address();
+        // TODO: assert this is my obligation
+        let obligation = payment_obligation.with(self.sim).clone();
+        let tx_template = self.construct_payment_transaction(obligation, change_addr);
         let spend = self
             .new_tx(|tx, _| {
-                tx.inputs = selected_coins
-                    .map(|o| Input {
-                        outpoint: o.outpoint,
-                    })
-                    .collect();
-
-                tx.outputs = vec![
-                    Output {
-                        amount: Amount::from_sat(amount),
-                        address_id: to_addr,
-                    },
-                    Output {
-                        amount: Amount::from_sat(drain.value),
-                        address_id: change_addr,
-                    },
-                ];
+                tx.inputs = tx_template.inputs;
+                tx.outputs = tx_template.outputs;
             })
             .id;
 

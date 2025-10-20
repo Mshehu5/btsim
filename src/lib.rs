@@ -263,6 +263,7 @@ struct Simulation {
     block_interval: usize,
     prng: ChaChaRng,
     peer_graph: PeerGraph,
+    /// Append only vector of messages
     messages: Vec<MessageData>,
 
     // secondary information (indexes)
