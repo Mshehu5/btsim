@@ -33,8 +33,10 @@ impl From<TxData> for lattice_psbt::UnOrderedTransaction {
 
 impl From<TxId> for bitcoin::Txid {
     fn from(txid: TxId) -> Self {
+        let mut buf = [0u8; 32];
         let txid_bytes = txid.0.to_le_bytes();
-        bitcoin::Txid::consensus_decode(&mut &txid_bytes[..]).unwrap()
+        buf[..txid_bytes.len()].copy_from_slice(&txid_bytes);
+        bitcoin::Txid::consensus_decode(&mut &buf[..]).expect("32 bytes should never fail")
     }
 }
 
@@ -61,7 +63,7 @@ impl From<Outpoint> for bitcoin::OutPoint {
 }
 
 // TODO rename to InputData?
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
 pub(crate) struct Input {
     pub(crate) outpoint: Outpoint, // sequence,
                                    // witness?
@@ -279,5 +281,16 @@ impl TxInfo {
 
     fn feerate(self) -> FeeRate {
         self.fee / self.weight
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_txid_encoding() {
+        let txid = TxId(1);
+        let txid_from_bytes = bitcoin::Txid::from(txid);
     }
 }
