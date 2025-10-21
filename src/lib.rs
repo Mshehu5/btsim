@@ -12,8 +12,8 @@ use crate::{
     message::{MessageData, MessageId},
     transaction::{Outpoint, TxData, TxHandle, TxId, TxInfo},
     wallet::{
-        AddressData, AddressId, PaymentObligationData, PaymentObligationId, WalletData, WalletId,
-        WalletInfo, WalletInfoId,
+        AddressData, AddressId, CollabroationSpend, PaymentObligationData, PaymentObligationId,
+        WalletData, WalletId, WalletInfo, WalletInfoId,
     },
 };
 
@@ -303,14 +303,19 @@ impl<'a> Simulation {
             }
         }
 
+        // We'll set up some payment obligations
+        for _ in 0..10 {
+            self.new_payment_obligation();
+        }
+
         self.assert_invariants();
     }
 
     fn tick(&mut self) {
         let messages = self.messages.clone();
+        // TODO: Right now we process every message everytime, should we have a cursor for the last message that was processes by the simulation?
         for message in messages.iter() {
             message.to.with_mut(self).handle_message(message.clone());
-            // TODO: handle broadcast messages
         }
 
         let wallet_ids = self.wallet_data.iter().map(|w| w.id).collect::<Vec<_>>();
@@ -331,7 +336,6 @@ impl<'a> Simulation {
                 .mine(self.miner_address(), self);
         }
 
-        self.new_payment_obligation();
         self.current_epoch = Epoch(self.current_epoch.0 + 1);
         self.assert_invariants();
     }
@@ -353,6 +357,10 @@ impl<'a> Simulation {
     fn miner_address(&mut self) -> AddressId {
         let miner = self.wallet_data[0].id;
         miner.with_mut(self).new_address()
+    }
+
+    fn broadcast_message(&mut self, message: MessageData) {
+        self.messages.push(message);
     }
 
     // TODO remove
@@ -414,6 +422,7 @@ impl<'a> Simulation {
             unconfirmed_txos: OrdSet::<Outpoint>::default(),
             confirmed_utxos: OrdSet::<Outpoint>::default(),
             unconfirmed_spends: OrdSet::<Outpoint>::default(),
+            collabroation_spends: Vec::<CollabroationSpend>::default(),
         });
 
         let id = WalletId(self.wallet_data.len());
@@ -557,19 +566,50 @@ impl std::fmt::Display for Simulation {
 
         writeln!(f, "\nPayment Obligations: {}", self.payment_data.len())?;
         for (i, payment) in self.payment_data.iter().enumerate() {
-            writeln!(f, "\nPayment {}:", i)?;
-            writeln!(f, "  Amount: {}", payment.amount)?;
-            writeln!(f, "  From: Wallet {}", payment.from.0)?;
-            writeln!(f, "  To: Address {}", payment.to.0)?;
-            writeln!(f, "  Deadline: Epoch {}", payment.deadline.0)?;
+            writeln!(
+                f,
+                "\nPayment {}: Amount: {}, From: Wallet {}, To: Address {}, Deadline: Epoch {}",
+                i, payment.amount, payment.from.0, payment.to.0, payment.deadline.0
+            )?;
         }
 
         writeln!(f, "\nPeer Messages: {}", self.messages.len())?;
         for (i, message) in self.messages.iter().enumerate() {
-            writeln!(f, "\nMessage {}:", i)?;
-            writeln!(f, "  From: Wallet {}", message.from.0)?;
-            writeln!(f, "  To: Wallet {}", message.to.0)?;
-            writeln!(f, "  Message Type: {:?}", message.message)?;
+            writeln!(
+                f,
+                "\nMessage {}: From: Wallet {}, To: Wallet {}, Message Type: {:?}",
+                i, message.from.0, message.to.0, message.message
+            )?;
+        }
+
+        let last_wallet_info_ids = self
+            .wallet_data
+            .iter()
+            .map(|w| (w.last_wallet_info_id.0))
+            .collect::<Vec<_>>();
+        let collabroation_spends = last_wallet_info_ids
+            .iter()
+            .map(|w| self.wallet_info[*w].collabroation_spends.clone())
+            .collect::<Vec<_>>();
+        for (i, collabroation_spend) in collabroation_spends.iter().enumerate() {
+            writeln!(f, "\nCollabroation Spend {}:", i)?;
+            for collabroation_spend in collabroation_spend.iter() {
+                writeln!(
+                    f,
+                    "  Payment Obligation ID: {:?}",
+                    collabroation_spend.payment_obligation_id
+                )?;
+                writeln!(
+                    f,
+                    "  Messages Sent: {:?}",
+                    collabroation_spend.messages_sent
+                )?;
+                writeln!(
+                    f,
+                    "  Messages Received: {:?}",
+                    collabroation_spend.messages_received
+                )?;
+            }
         }
 
         writeln!(f, "\nBlocks: {}", self.block_data.len())?;
@@ -590,7 +630,7 @@ mod tests {
 
     #[test]
     fn test_universe() {
-        let mut sim = SimulationBuilder::new(42, 2, 10, 1).build();
+        let mut sim = SimulationBuilder::new(42, 2, 20, 1).build();
         sim.assert_invariants();
         sim.build_universe();
         sim.run();

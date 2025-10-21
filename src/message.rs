@@ -1,7 +1,13 @@
-use crate::wallet::WalletId;
+use crate::{
+    transaction::{Input, Output},
+    wallet::WalletId,
+};
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
-pub(crate) enum MessageType {}
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) enum MessageType {
+    RegisterInputs(Vec<Input>),
+    RegisterOutputs(Vec<Output>),
+}
 
 define_entity!(
     Message,
@@ -10,6 +16,7 @@ define_entity!(
         pub(crate) message: MessageType,
         pub(crate) from: WalletId,
         pub(crate) to: WalletId,
+        pub(crate) previous_message: Option<MessageId>,
     },
     {
     }
