@@ -1,7 +1,7 @@
 use crate::{
     blocks::{BroadcastSetHandleMut, BroadcastSetId},
     cospend::{CospendData, CospendId},
-    message::{InitiateCospend, MessageData, MessageId, MessageType, RegisterInput},
+    message::{InitiateCospend, MessageData, MessageId, MessageType},
     Epoch, Simulation,
 };
 use bdk_coin_select::{
@@ -138,7 +138,7 @@ impl<'a> WalletHandleMut<'a> {
         &mut self.sim.wallet_data[self.id.0]
     }
 
-    pub(crate) fn info_mut<'b>(&'b mut self) -> &'b mut WalletInfo {
+    fn info_mut<'b>(&'b mut self) -> &'b mut WalletInfo {
         &mut self.sim.wallet_info[self.id.0]
     }
 
@@ -353,7 +353,7 @@ impl<'a> WalletHandleMut<'a> {
     }
 
     // TODO: refactor this? Do we event need this?
-    pub(crate) fn spend_tx(&mut self, txdata: TxData) -> TxId {
+    fn spend_tx(&mut self, txdata: TxData) -> TxId {
         // TODO: assert this is my obligation
         let spend = self
             .new_tx(|tx, _| {

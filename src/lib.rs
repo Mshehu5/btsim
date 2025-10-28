@@ -11,7 +11,7 @@ use crate::{
     },
     cospend::{CospendData, CospendId},
     message::{MessageData, MessageId},
-    transaction::{Input, Outpoint, TxData, TxHandle, TxId, TxInfo},
+    transaction::{Outpoint, TxData, TxHandle, TxId, TxInfo},
     wallet::{
         AddressData, AddressId, PaymentObligationData, PaymentObligationId, WalletData, WalletId,
         WalletInfo, WalletInfoId,
