@@ -26,6 +26,20 @@ mod message;
 mod transaction;
 mod wallet;
 
+#[derive(Debug)]
+struct PrngFactory(ChaChaRng);
+
+impl PrngFactory {
+    fn new(seed: u64) -> Self {
+        Self(ChaChaRng::seed_from_u64(seed))
+    }
+
+    fn generate_prng(&mut self) -> ChaChaRng {
+        let seed = self.0.gen_range(0..u64::MAX);
+        ChaChaRng::seed_from_u64(seed)
+    }
+}
+
 // TODO use bitcoin::transaction::predict_weight(inputs: IntoIter<InputWeightPrediction>, output_lengths: IntoIter<u64>)
 
 // all have RBF and non-RBF variants?
@@ -137,7 +151,7 @@ pub(crate) struct Epoch(usize);
 
 #[derive(Debug)]
 struct SimulationBuilder {
-    prng: ChaChaRng,
+    seed: u64,
     /// Number of wallets/agents in the simulation
     num_wallets: usize,
     /// Total number of epochs for the simulation
@@ -149,9 +163,9 @@ struct SimulationBuilder {
 impl SimulationBuilder {
     fn new_random(num_wallets: usize, max_epochs: usize, block_interval: usize) -> Self {
         debug_assert!(num_wallets >= 2);
-        let chacha = ChaChaRng::from_rng(rand::thread_rng()).unwrap();
+        let seed = rand::thread_rng().gen_range(0..u64::MAX);
         Self {
-            prng: chacha,
+            seed,
             num_wallets,
             max_epochs,
             block_interval,
@@ -160,9 +174,8 @@ impl SimulationBuilder {
 
     fn new(seed: u64, num_wallets: usize, max_epochs: usize, block_interval: usize) -> Self {
         debug_assert!(num_wallets >= 2);
-        let chacha = ChaChaRng::seed_from_u64(seed);
         Self {
-            prng: chacha,
+            seed,
             num_wallets,
             max_epochs,
             block_interval,
@@ -187,6 +200,7 @@ impl SimulationBuilder {
     }
 
     fn build(self) -> Simulation {
+        let prng_factory = PrngFactory::new(self.seed);
         let mut sim = Simulation {
             peer_graph: self.create_fully_connected_peer_graph(),
             wallet_data: Vec::new(),
@@ -198,7 +212,7 @@ impl SimulationBuilder {
             current_epoch: Epoch(0),
             block_interval: self.block_interval,
             max_epochs: Epoch(0),
-            prng: ChaChaRng::from_rng(rand::thread_rng()).unwrap(),
+            prng_factory,
             spends: OrdMap::new(),
             wallet_info: Vec::new(),
             block_info: Vec::new(),
@@ -209,7 +223,6 @@ impl SimulationBuilder {
             last_processed_message: MessageId(0),
         };
         sim.max_epochs = Epoch(self.max_epochs);
-        sim.prng = self.prng;
 
         // genesis block has empty coinbase
         sim.tx_data.push(TxData::default());
@@ -253,7 +266,7 @@ impl SimulationBuilder {
 }
 
 /// all entities are numbered sequentially
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 struct Simulation {
     // primary information
     wallet_data: Vec<WalletData>,
@@ -266,7 +279,7 @@ struct Simulation {
     current_epoch: Epoch,
     max_epochs: Epoch,
     block_interval: usize,
-    prng: ChaChaRng,
+    prng_factory: PrngFactory,
     peer_graph: PeerGraph,
     /// Append only vector of messages
     messages: Vec<MessageData>,
@@ -283,6 +296,7 @@ struct Simulation {
 
 impl<'a> Simulation {
     fn build_universe(&mut self) {
+        let mut prng = self.prng_factory.generate_prng();
         let wallets = self.wallet_data.clone();
         let addresses = wallets
             .iter()
@@ -292,7 +306,7 @@ impl<'a> Simulation {
         // For now we just mine a coinbase transaction for each wallet
         let mut i = 0;
         for address in addresses.iter() {
-            let coinbases_to_receive = self.prng.gen_range(1..10);
+            let coinbases_to_receive = prng.gen_range(1..10);
             for _ in 0..coinbases_to_receive {
                 let _ = BroadcastSetHandleMut {
                     id: BroadcastSetId(i),
@@ -367,21 +381,20 @@ impl<'a> Simulation {
 
     /// Creates a random payment obligation between two wallets.
     fn new_payment_obligation(&mut self) {
+        let mut prng = self.prng_factory.generate_prng();
         if self.max_epochs.0 - self.current_epoch.0 < 2 {
             // Not enough epochs left to create a payment obligation
             return;
         }
         let max_wallets = self.wallet_data.len() - 1;
-        let from = self.prng.gen_range(0..=max_wallets);
-        let mut to = self.prng.gen_range(0..=max_wallets);
+        let from = prng.gen_range(0..=max_wallets);
+        let mut to = prng.gen_range(0..=max_wallets);
         if to == from {
             to = (to + 1) % max_wallets;
         }
         // TODO: should be a configurable or dependent on the balance of each wallet?
-        let amount = self.prng.gen_range(1..5);
-        let deadline = self
-            .prng
-            .gen_range(self.current_epoch.0 + 1..self.max_epochs.0);
+        let amount = prng.gen_range(1..5);
+        let deadline = prng.gen_range(self.current_epoch.0 + 1..self.max_epochs.0);
         let to_wallet = WalletId(to);
         // First insert payment obligation into simulation
         let payment_obligation_id = PaymentObligationId(self.payment_data.len());

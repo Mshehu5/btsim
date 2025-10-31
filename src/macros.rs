@@ -8,7 +8,7 @@ macro_rules! define_entity_id_and_handle {
             pub(crate) struct [<$base Id>](pub (crate) usize); // TODO Outpoint is OutputId, InputId is also a tuple
 
             /// Ephemeral view into primary and second information of $base.
-            #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+            #[derive(Debug, Clone, Copy)]
             pub(crate) struct [<$base Handle>]<'a> {
                 sim: &'a crate::Simulation,
                 pub(crate) id: [<$base Id>],
