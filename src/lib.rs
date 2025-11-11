@@ -521,6 +521,14 @@ impl<'a> Simulation {
             );
         });
 
+        self.spends.iter().for_each(|(outpoint, inputs)| {
+            assert!(
+                inputs.len() == 1,
+                "Outpoint {:?} spent multiple times",
+                outpoint
+            );
+        });
+
         // TODO: assert that expected payments and payment obligations met
         // TODO: assert that for each payment obligation, the from wallet has the expected payment
 
