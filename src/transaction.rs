@@ -41,7 +41,7 @@ impl From<TxId> for bitcoin::Txid {
 }
 
 // TODO rename to OutputId?
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
 pub(crate) struct Outpoint {
     pub(crate) txid: TxId,
     pub(crate) index: usize,

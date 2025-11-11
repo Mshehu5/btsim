@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bitcoin::{Amount, Weight};
 use im::{OrdMap, OrdSet, Vector};
 use petgraph::graph::{NodeIndex, UnGraph};
@@ -303,8 +305,7 @@ impl<'a> Simulation {
         // For now we just mine a coinbase transaction for each wallet
         let mut i = 0;
         for address in addresses.iter() {
-            let coinbases_to_receive = prng.gen_range(1..10);
-            for _ in 0..coinbases_to_receive {
+            for _ in 0..prng.gen_range(1..10) {
                 let _ = BroadcastSetHandleMut {
                     id: BroadcastSetId(i),
                     sim: self,
@@ -312,15 +313,13 @@ impl<'a> Simulation {
                 .construct_block_template(Weight::MAX_BLOCK)
                 .mine(*address, self);
 
-                // Do we need to track this here? or will it be tracked in the broadcast set update_wallets?
-                // wallet.own_transactions.push(coinbase_tx.coinbase_tx().id);
-
                 self.assert_invariants();
                 i += 1;
             }
         }
 
         // We'll set up some payment obligations
+        // TODO: the amount of payment obligation should be configurable or comes from the rng
         for _ in 0..10 {
             self.new_payment_obligation();
         }
@@ -330,7 +329,6 @@ impl<'a> Simulation {
 
     fn tick(&mut self) {
         let wallet_ids = self.wallet_data.iter().map(|w| w.id).collect::<Vec<_>>();
-        // Skip the first wallet, which is the "miner"
         for wallet_id in wallet_ids.iter() {
             wallet_id.with_mut(self).wake_up();
         }
@@ -345,7 +343,6 @@ impl<'a> Simulation {
         }
 
         self.current_timestep = TimeStep(self.current_timestep.0 + 1);
-        self.assert_invariants();
     }
 
     fn run(&mut self) {
@@ -392,7 +389,7 @@ impl<'a> Simulation {
             let payment_obligation_id = PaymentObligationId(self.payment_data.len());
             self.payment_data.push(PaymentObligationData {
                 id: payment_obligation_id,
-                amount: Amount::from_int_btc(prng.gen_range(1..5)),
+                amount: Amount::from_sat(prng.gen_range(500..100_000)),
                 from,
                 to,
                 deadline: TimeStep(deadline),
@@ -425,6 +422,8 @@ impl<'a> Simulation {
             unconfirmed_txos: OrdSet::<Outpoint>::default(),
             confirmed_utxos: OrdSet::<Outpoint>::default(),
             unconfirmed_spends: OrdSet::<Outpoint>::default(),
+            unconfirmed_txos_in_cospends: HashMap::<Outpoint, CospendId>::default(),
+            payment_obligation_to_cospend: HashMap::<PaymentObligationId, CospendId>::default(),
         });
 
         let id = WalletId(self.wallet_data.len());

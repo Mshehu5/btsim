@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{
     blocks::{BroadcastSetHandleMut, BroadcastSetId},
     cospend::{CospendData, CospendId},
@@ -35,6 +37,10 @@ define_entity_mut_updatable!(
         pub(crate) unconfirmed_transactions: OrdSet<TxId>,
         pub(crate) unconfirmed_txos: OrdSet<Outpoint>,  // compute CPFP cost
         pub(crate) unconfirmed_spends: OrdSet<Outpoint>, // RBFable
+        pub(crate) payment_obligation_to_cospend: HashMap<PaymentObligationId, CospendId>,
+        /// Map of unconfirmed txos to the cospends that they are in
+        // TODO: need something similar for outputs as to prevent double spending to the same payment obligation
+        pub(crate) unconfirmed_txos_in_cospends: HashMap<Outpoint, CospendId>,
     }
 );
 
@@ -123,8 +129,13 @@ impl<'a> WalletHandle<'a> {
     }
 
     fn unspent_coins(&self) -> impl Iterator<Item = OutputHandle<'a>> + '_ {
-        self.potentially_spendable_txos()
-            .filter(|o| !self.info().unconfirmed_spends.contains(&o.outpoint()))
+        self.potentially_spendable_txos().filter(|o| {
+            !self.info().unconfirmed_spends.contains(&o.outpoint())
+                && !self
+                    .info()
+                    .unconfirmed_txos_in_cospends
+                    .contains_key(&o.outpoint())
+        })
     }
 
     fn double_spendable_coins(&self) -> impl Iterator<Item = OutputHandle<'a>> + '_ {
@@ -139,7 +150,8 @@ impl<'a> WalletHandleMut<'a> {
     }
 
     fn info_mut<'b>(&'b mut self) -> &'b mut WalletInfo {
-        &mut self.sim.wallet_info[self.id.0]
+        let last_wallet_info_id = self.data().last_wallet_info_id;
+        &mut self.sim.wallet_info[last_wallet_info_id.0]
     }
 
     pub(crate) fn new_address(&mut self) -> AddressId {
@@ -257,11 +269,24 @@ impl<'a> WalletHandleMut<'a> {
         }
         // if we have a payment obligation then lets batch it with this cospend
         if let Some(payment_obligation_id) = self.next_payment_obligation() {
+            if self
+                .info()
+                .payment_obligation_to_cospend
+                .contains_key(&payment_obligation_id)
+            {
+                // TODO: ideally we would iterate to the next high priority payment obligation and use that to cospend
+                return None;
+            }
             let payment_obligation = payment_obligation_id.with(self.sim).data().clone();
             let change_addr = self.new_address();
             let to_address = payment_obligation.to.with_mut(self.sim).new_address();
             let mut tx_template =
                 self.construct_transaction_template(&payment_obligation, &change_addr, &to_address);
+            for input in tx_template.inputs.iter() {
+                self.info_mut()
+                    .unconfirmed_txos_in_cospends
+                    .insert(input.outpoint, cospend.id);
+            }
             tx_template.inputs.extend(cospend.inputs.iter().cloned());
             tx_template.outputs.extend(cospend.outputs.iter().cloned());
 
@@ -272,13 +297,31 @@ impl<'a> WalletHandleMut<'a> {
                 .handled_payment_obligations
                 .insert(payment_obligation_id);
             self.data_mut().participating_cospends.insert(cospend.id);
+            self.info_mut()
+                .payment_obligation_to_cospend
+                .insert(payment_obligation_id, cospend.id);
+
             return Some(tx_id);
         }
 
         None
     }
 
-    fn create_cospend(&mut self, payment_obligation: &PaymentObligationData) -> CospendData {
+    fn create_cospend(
+        &mut self,
+        payment_obligation: &PaymentObligationData,
+    ) -> Option<CospendData> {
+        println!(
+            "creating cospend for payment obligation: {:?}",
+            payment_obligation.id
+        );
+        if self
+            .info()
+            .payment_obligation_to_cospend
+            .contains_key(&payment_obligation.id)
+        {
+            return None;
+        }
         let cospend_id = CospendId(self.sim.cospends.len());
         let change_addr = self.new_address();
         let to_address = payment_obligation.to.with_mut(self.sim).new_address();
@@ -291,7 +334,15 @@ impl<'a> WalletHandleMut<'a> {
             valid_till: payment_obligation.deadline,
         };
         self.data_mut().participating_cospends.insert(cospend_id);
-        cospend
+        for input in cospend.inputs.iter() {
+            self.info_mut()
+                .unconfirmed_txos_in_cospends
+                .insert(input.outpoint, cospend_id);
+        }
+        self.info_mut()
+            .payment_obligation_to_cospend
+            .insert(payment_obligation.id, cospend_id);
+        Some(cospend)
     }
 
     pub(crate) fn wake_up(&'a mut self) {
@@ -314,26 +365,28 @@ impl<'a> WalletHandleMut<'a> {
             // TODO: this should be configurable
             // Right now the wallets are patient for the most part
             if time_left <= 2 {
-                let tx_id = self.handle_payment_obligations(&payment_obligation);
-                txs_to_broadcast.push(tx_id);
+                self.handle_payment_obligations(&payment_obligation);
                 // TODO: if we are handling a payment obligation, we should not register inputs. This doesn't have to be the case but doing this for now bc its easier to debug
                 return;
             }
 
             // If its not due soon lets batch the payment
-            let cospend = self.create_cospend(&payment_obligation);
-            let message_id = MessageId(self.sim.messages.len());
-            let message = MessageData {
-                id: message_id,
-                from: self.id,
-                to: Some(payment_obligation.to),
-                message: MessageType::RegisterCospend(InitiateCospend {
-                    cospend_id: cospend.id,
-                }),
-            };
-            self.data_mut().participating_cospends.insert(cospend.id);
-            self.sim.broadcast_message(message.clone());
-            self.sim.cospends.push(cospend);
+            // TODO: if we have already created a cospend for this payment obligation we should loop
+            // to the next high priority payment obligation and use that to cospend
+            if let Some(cospend) = self.create_cospend(&payment_obligation) {
+                let message_id = MessageId(self.sim.messages.len());
+                let message = MessageData {
+                    id: message_id,
+                    from: self.id,
+                    to: Some(payment_obligation.to),
+                    message: MessageType::RegisterCospend(InitiateCospend {
+                        cospend_id: cospend.id,
+                    }),
+                };
+                self.data_mut().participating_cospends.insert(cospend.id);
+                self.sim.broadcast_message(message.clone());
+                self.sim.cospends.push(cospend);
+            }
 
             self.broadcast(txs_to_broadcast);
         }
