@@ -29,11 +29,12 @@ where
 
     pub(crate) fn grow(&mut self, id: WalletId) {
         if self.graph.node_count() < self.m {
-            let j = self.graph.add_node(id);
-
             // connect to the first node if it exists, forming a star graph
             if let Some(i) = self.graph.node_indices().next() {
+                let j = self.graph.add_node(id);
                 self.graph.add_edge(j, i, self.rng.gen_range(0.0..1.0)); // TODO 1.0 is too high
+            } else {
+                self.graph.add_node(id);
             }
         } else {
             let seed = self.rng.next_u64();
@@ -61,7 +62,7 @@ where
     // settle on a power law stationary distribution of wealth
     pub(crate) fn next_ordered_payment_pairs(
         &'a mut self,
-    ) -> impl Iterator<Item = (WalletId, WalletId)> + '_ {
+    ) -> impl Iterator<Item = (WalletId, WalletId)> + 'a {
         self.graph.edge_indices().flat_map(|i| {
             if self.rng.gen_bool(*self.graph.edge_weight(i).unwrap()) {
                 // can default to 0.0 but this shouldn't happen

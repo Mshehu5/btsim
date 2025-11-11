@@ -330,7 +330,7 @@ impl<'a> Simulation {
         // For now we just mine a coinbase transaction for each wallet
         let mut i = 0;
         for address in addresses.iter() {
-            for _ in 0..prng.gen_range(1..10) {
+            for _ in 0..prng.gen_range(5..10) {
                 let _ = BroadcastSetHandleMut {
                     id: BroadcastSetId(i),
                     sim: self,
@@ -408,6 +408,7 @@ impl<'a> Simulation {
         }
 
         for (from, to) in payment_pairs {
+            debug_assert!(from != to, "circular payment obligation");
             // TODO: should be a configurable or dependent on the balance of each wallet?
             let deadline = prng.gen_range(self.current_timestep.0 + 1..self.config.max_timestep.0);
             // First insert payment obligation into simulation
@@ -652,7 +653,7 @@ mod tests {
 
     #[test]
     fn test_universe() {
-        let mut sim = SimulationBuilder::new(42, 2, TimeStep(20), 1, 10).build();
+        let mut sim = SimulationBuilder::new(42, 3, TimeStep(20), 1, 10).build();
         sim.assert_invariants();
         sim.build_universe();
         sim.run();
