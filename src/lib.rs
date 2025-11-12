@@ -344,10 +344,7 @@ impl<'a> Simulation {
         }
 
         // We'll set up some payment obligations
-        // TODO: the amount of payment obligation should be configurable or comes from the rng
-        for _ in 0..10 {
-            self.new_payment_obligation();
-        }
+        self.setup_initial_payment_schedule();
 
         self.assert_invariants();
     }
@@ -399,39 +396,42 @@ impl<'a> Simulation {
     }
 
     /// Creates a random payment obligation between two wallets.
-    fn new_payment_obligation(&mut self) {
+    fn setup_initial_payment_schedule(&mut self) {
         let mut prng = self.prng_factory.generate_prng();
-        let payment_pairs = self.economic_graph.next_ordered_payment_pairs();
         if self.config.max_timestep.0 - self.current_timestep.0 < 2 {
             // Not enough timesteps left to create a payment obligation
             return;
         }
+        let mut i = 0;
+        while i < self.config.num_payment_obligations {
+            for (from, to) in self.economic_graph.next_ordered_payment_pairs() {
+                debug_assert!(from != to, "circular payment obligation");
+                // TODO: should be a configurable or dependent on the balance of each wallet?
+                let deadline =
+                    prng.gen_range(self.current_timestep.0 + 1..self.config.max_timestep.0);
+                // First insert payment obligation into simulation
+                let payment_obligation_id = PaymentObligationId(self.payment_data.len());
+                self.payment_data.push(PaymentObligationData {
+                    id: payment_obligation_id,
+                    amount: Amount::from_sat(prng.gen_range(500..100_000)),
+                    from,
+                    to,
+                    deadline: TimeStep(deadline),
+                });
 
-        for (from, to) in payment_pairs {
-            debug_assert!(from != to, "circular payment obligation");
-            // TODO: should be a configurable or dependent on the balance of each wallet?
-            let deadline = prng.gen_range(self.current_timestep.0 + 1..self.config.max_timestep.0);
-            // First insert payment obligation into simulation
-            let payment_obligation_id = PaymentObligationId(self.payment_data.len());
-            self.payment_data.push(PaymentObligationData {
-                id: payment_obligation_id,
-                amount: Amount::from_sat(prng.gen_range(500..100_000)),
-                from,
-                to,
-                deadline: TimeStep(deadline),
-            });
+                // Then insert into to_wallet's expected payments
+                let last_wallet_info_id = self.wallet_data[to.0].last_wallet_info_id;
+                self.wallet_info[last_wallet_info_id.0]
+                    .expected_payments
+                    .insert(payment_obligation_id);
 
-            // Then insert into to_wallet's expected payments
-            let last_wallet_info_id = self.wallet_data[to.0].last_wallet_info_id;
-            self.wallet_info[last_wallet_info_id.0]
-                .expected_payments
-                .insert(payment_obligation_id);
-
-            // Then insert into from_wallet's payment obligations
-            let last_wallet_info_id = self.wallet_data[from.0].last_wallet_info_id;
-            self.wallet_info[last_wallet_info_id.0]
-                .payment_obligations
-                .insert(payment_obligation_id);
+                // Then insert into from_wallet's payment obligations
+                let last_wallet_info_id = self.wallet_data[from.0].last_wallet_info_id;
+                self.wallet_info[last_wallet_info_id.0]
+                    .payment_obligations
+                    .insert(payment_obligation_id);
+                i += 1;
+            }
         }
     }
 
@@ -450,6 +450,8 @@ impl<'a> Simulation {
             unconfirmed_spends: OrdSet::<Outpoint>::default(),
             unconfirmed_txos_in_cospends: HashMap::<Outpoint, CospendId>::default(),
             payment_obligation_to_cospend: HashMap::<PaymentObligationId, CospendId>::default(),
+            txid_to_handle_payment_obligation: HashMap::<TxId, PaymentObligationId>::default(),
+            handled_payment_obligations: OrdSet::<PaymentObligationId>::default(),
         });
 
         let id = WalletId(self.wallet_data.len());
@@ -459,7 +461,6 @@ impl<'a> Simulation {
             addresses: Vec::default(),
             own_transactions: Vec::default(),
             last_processed_message: MessageId(0),
-            handled_payment_obligations: OrdSet::<PaymentObligationId>::default(),
             participating_cospends: OrdSet::<CospendId>::default(),
         });
         id
@@ -653,7 +654,7 @@ mod tests {
 
     #[test]
     fn test_universe() {
-        let mut sim = SimulationBuilder::new(42, 5, TimeStep(50), 1, 20).build();
+        let mut sim = SimulationBuilder::new(42, 5, TimeStep(2), 1, 10).build();
         sim.assert_invariants();
         sim.build_universe();
         sim.run();
@@ -675,14 +676,24 @@ mod tests {
         // Lets check the simulation state after the run
         // Specifically how many payment obligations we're missed
         // And how many were created in a cospend
+        let total_payment_obligations = sim.payment_data.len();
+        println!("Total payment obligations: {}", total_payment_obligations);
         let mut missed_payment_obligation = std::collections::HashMap::<WalletId, usize>::new();
         sim.get_wallet_handles().for_each(|w| {
-            let handled_payment_obligations = w.data().handled_payment_obligations.clone();
+            let handled_payment_obligations = w.info().handled_payment_obligations.clone();
             let payment_obligations = w.info().payment_obligations.clone();
-            let union = handled_payment_obligations.union(payment_obligations);
+            let union = handled_payment_obligations.difference(payment_obligations);
             missed_payment_obligation.insert(w.data().id, union.len());
         });
-        println!("Missed payment obligations: {:?}", missed_payment_obligation);
+        println!(
+            "Missed payment obligations: {:?}",
+            missed_payment_obligation
+        );
+        println!(
+            "Missed payment obligations percentage: {:?}",
+            missed_payment_obligation.values().sum::<usize>() as f64
+                / total_payment_obligations as f64
+        );
     }
 
     #[test]

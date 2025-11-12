@@ -2,6 +2,7 @@ use bitcoin::{Amount, Weight};
 use im::OrdSet;
 
 use crate::{
+    cospend::CospendId,
     define_entity,
     transaction::{Outpoint, Output, TxHandle, TxId},
     wallet::{AddressId, WalletHandle, WalletId, WalletInfo, WalletInfoId},
@@ -174,7 +175,8 @@ impl<'a> BroadcastSetHandleMut<'a> {
             }
             BroadcastSetData::Block(_) => {
                 for tx in &self.chain_tip().info().confirmed_txs {
-                    for input in tx.with(self.sim).inputs() {
+                    let tx_handle = tx.with(self.sim);
+                    for input in tx_handle.inputs() {
                         let prevout = input.prevout();
                         let wallet = prevout.wallet();
 
@@ -184,6 +186,23 @@ impl<'a> BroadcastSetHandleMut<'a> {
                             info.unconfirmed_txos.remove(&input.data().outpoint);
                             info.unconfirmed_spends.remove(&input.data().outpoint);
                             info.unconfirmed_transactions.remove(tx);
+                            if let Some(payment_obligation_id) =
+                                wallet.info().txid_to_handle_payment_obligation.get(tx)
+                            {
+                                info.handled_payment_obligations
+                                    .insert(*payment_obligation_id);
+                            }
+                            if let Some(cospend_id) =
+                                info.unconfirmed_txos_in_cospends.get(&input.id.into())
+                            {
+                                info.payment_obligation_to_cospend
+                                    .iter()
+                                    .find(|(_, c)| **c == *cospend_id)
+                                    .map(|(payment_obligation_id, _)| {
+                                        info.handled_payment_obligations
+                                            .insert(*payment_obligation_id);
+                                    });
+                            }
                         })
                     }
 

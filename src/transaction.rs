@@ -1,3 +1,4 @@
+use crate::cospend::CospendId;
 use crate::wallet::{AddressHandle, AddressId, WalletHandle, WalletHandleMut};
 use crate::Simulation;
 use bitcoin::consensus::Decodable;
@@ -79,6 +80,12 @@ impl From<Input> for lattice_psbt::Vin {
 pub(crate) struct InputId {
     pub(crate) txid: TxId,
     pub(crate) index: usize,
+}
+
+impl From<InputId> for Outpoint {
+    fn from(id: InputId) -> Self {
+        Outpoint { txid: id.txid, index: id.index }
+    }
 }
 
 pub(crate) struct InputHandle<'a> {

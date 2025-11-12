@@ -26,7 +26,6 @@ define_entity_mut_updatable!(
         pub(crate) last_wallet_info_id: WalletInfoId, // Monotone
         // Monotone index of the last message that was processed by this wallet
         pub(crate) last_processed_message: MessageId,
-        pub(crate) handled_payment_obligations: OrdSet<PaymentObligationId>,
         pub(crate) participating_cospends: OrdSet<CospendId>,
     },
     {
@@ -43,6 +42,12 @@ define_entity_mut_updatable!(
         /// Map of unconfirmed txos to the cospends that they are in
         // TODO: need something similar for outputs as to prevent double spending to the same payment obligation
         pub(crate) unconfirmed_txos_in_cospends: HashMap<Outpoint, CospendId>,
+        /// Map of txids to the payment obligations that they are associated with
+        /// Sim state should refrence this when updating wallet states after confirmation
+        pub(crate) txid_to_handle_payment_obligation: HashMap<TxId, PaymentObligationId>,
+
+        /// Set of payment obligations that have been handled
+        pub(crate) handled_payment_obligations: OrdSet<PaymentObligationId>,
     }
 );
 
@@ -253,7 +258,7 @@ impl<'a> WalletHandleMut<'a> {
         self.info()
             .payment_obligations
             .clone()
-            .difference(self.data().handled_payment_obligations.clone())
+            .difference(self.info().handled_payment_obligations.clone())
             .iter()
             .filter(|payment_obligation_id| {
                 let time_left = payment_obligation_id.with(self.sim).data().deadline.0 as i32
@@ -295,15 +300,13 @@ impl<'a> WalletHandleMut<'a> {
             tx_template.outputs.extend(cospend.outputs.iter().cloned());
 
             let tx_id = self.spend_tx(tx_template);
-            // TODO: if this was a failure, we should not mark the payment obligation as handled
-            // Moreover this should be handled when we are updating wallet states for all wallets after confirmation
-            self.data_mut()
-                .handled_payment_obligations
-                .insert(payment_obligation_id);
             self.data_mut().participating_cospends.insert(cospend.id);
             self.info_mut()
                 .payment_obligation_to_cospend
                 .insert(payment_obligation_id, cospend.id);
+            self.info_mut()
+                .txid_to_handle_payment_obligation
+                .insert(tx_id, payment_obligation_id);
 
             return Some(tx_id);
         }
@@ -332,6 +335,9 @@ impl<'a> WalletHandleMut<'a> {
         self.info_mut()
             .payment_obligation_to_cospend
             .insert(payment_obligation.id, cospend_id);
+
+        self.data_mut().participating_cospends.insert(cospend.id);
+        self.sim.cospends.push(cospend.clone());
         cospend
     }
 
@@ -361,8 +367,6 @@ impl<'a> WalletHandleMut<'a> {
             }
 
             // If its not due soon lets batch the payment
-            // TODO: if we have already created a cospend for this payment obligation we should loop
-            // to the next high priority payment obligation and use that to cospend
             let cospend = self.create_cospend(&payment_obligation);
             let message_id = MessageId(self.sim.messages.len());
             let message = MessageData {
@@ -373,9 +377,7 @@ impl<'a> WalletHandleMut<'a> {
                     cospend_id: cospend.id,
                 }),
             };
-            self.data_mut().participating_cospends.insert(cospend.id);
             self.sim.broadcast_message(message.clone());
-            self.sim.cospends.push(cospend);
 
             self.broadcast(txs_to_broadcast);
         }
@@ -393,9 +395,9 @@ impl<'a> WalletHandleMut<'a> {
             self.construct_transaction_template(payment_obligation, &change_addr, &to_address);
 
         let tx_id = self.spend_tx(tx_template);
-        self.data_mut()
-            .handled_payment_obligations
-            .insert(payment_obligation_id);
+        self.info_mut()
+            .txid_to_handle_payment_obligation
+            .insert(tx_id, payment_obligation_id);
         self.broadcast(vec![tx_id]);
         tx_id
     }
