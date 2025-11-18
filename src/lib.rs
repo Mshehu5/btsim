@@ -235,7 +235,6 @@ impl SimulationBuilder {
             broadcast_set_info: Vec::new(),
             messages: Vec::new(),
             cospends: Vec::new(),
-            last_processed_message: MessageId(0),
             economic_graph: EconomicGraph::new(3, economic_graph_prng),
             config: SimulationConfig {
                 num_wallets: self.num_wallets,
@@ -324,7 +323,6 @@ pub struct Simulation {
     block_info: Vec<BlockInfo>,
     tx_info: Vec<TxInfo>,
     broadcast_set_info: Vec<BroadcastSetInfo>,
-    last_processed_message: MessageId,
 }
 
 impl<'a> Simulation {
