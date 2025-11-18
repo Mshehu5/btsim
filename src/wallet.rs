@@ -23,8 +23,6 @@ define_entity_mut_updatable!(
         pub(crate) last_wallet_info_id: WalletInfoId, // Monotone
         // Monotone index of the last message that was processed by this wallet
         pub(crate) last_processed_message: MessageId,
-        /// Internal index of the cospends that this wallet is participating in
-        pub(crate) participating_cospends: OrdSet<MessageId>,
     },
     {
         pub(crate) broadcast_set_id: BroadcastSetId,
@@ -72,7 +70,7 @@ impl<'a> WalletHandle<'a> {
         let candidates: Vec<Candidate> = utxos
             .iter()
             .enumerate()
-            .map(|(i, o)| Candidate {
+            .map(|(_, o)| Candidate {
                 value: o.data().amount.to_sat(),
                 weight: TR_KEYSPEND_TXIN_WEIGHT,
                 input_count: 1,
@@ -136,6 +134,7 @@ impl<'a> WalletHandle<'a> {
     fn unspent_coins(&self) -> impl Iterator<Item = OutputHandle<'a>> + '_ {
         self.potentially_spendable_txos().filter(|o| {
             !self.info().unconfirmed_spends.contains(&o.outpoint())
+            // TODO: these inputs should unlock if the cospend is expired or the associated payment obligation is due soon (i.e payment anxiety)
                 && !self
                     .info()
                     .unconfirmed_txos_in_cospends
@@ -199,7 +198,9 @@ impl<'a> WalletHandleMut<'a> {
             }
         }
 
-        self.data_mut().last_processed_message = messages_to_process.iter().last().unwrap().id;
+        // Plus one to avoid processing the same message twice
+        self.data_mut().last_processed_message =
+            MessageId(messages_to_process.last().unwrap().id.0 + 1);
         cospend_ids_to_process
     }
 
@@ -279,10 +280,6 @@ impl<'a> WalletHandleMut<'a> {
         message_id: MessageId,
         cospend: &CoSpendProposal,
     ) -> Option<TxId> {
-        // If im already participating in this cospend, no need to respond to registration message
-        if self.data().participating_cospends.contains(&message_id) {
-            return None;
-        }
         if cospend.valid_till < self.sim.current_timestep {
             return None;
         }
@@ -312,9 +309,7 @@ impl<'a> WalletHandleMut<'a> {
             debug_assert!(tx_template.wallet_acks.contains(&self.id));
 
             let tx_id = self.spend_tx(tx_template);
-            // Mark that we are participating in this cospend, as to prevent double participating
-            // TODO: this is unnececary as we would never process the same message twice. We may just want to "lock" the inputs only
-            self.data_mut().participating_cospends.insert(message_id);
+            /// Keep an index of what payment obligations are being handled in which cospends
             self.info_mut()
                 .payment_obligation_to_cospend
                 .insert(payment_obligation_id, message_id);
@@ -343,7 +338,6 @@ impl<'a> WalletHandleMut<'a> {
             tx: tx_template,
             valid_till: payment_obligation.deadline,
         };
-        self.data_mut().participating_cospends.insert(message_id);
         // "Lock" The inputs to this cospend. These inputs can be spent if the cospend is expired and our payment is due soon
         for input in cospend.tx.inputs.iter() {
             self.info_mut()

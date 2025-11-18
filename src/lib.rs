@@ -465,7 +465,6 @@ impl<'a> Simulation {
             addresses: Vec::default(),
             own_transactions: Vec::default(),
             last_processed_message: MessageId(0),
-            participating_cospends: OrdSet::<MessageId>::default(),
         });
         id
     }
