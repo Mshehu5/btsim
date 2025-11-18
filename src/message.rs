@@ -1,17 +1,4 @@
-use crate::{
-    cospend::CospendId,
-    transaction::{Input, Output},
-    wallet::WalletId,
-    TimeStep,
-};
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub(crate) struct RegisterInput {
-    pub(crate) wallet_id: WalletId,
-    pub(crate) input: Input,
-    /// If None, the input is valid forever, otherwise it is valid until the timestep in the option
-    pub(crate) valid_till: Option<TimeStep>,
-}
+use crate::{cospend::CospendId, wallet::WalletId};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct InitiateCospend {
@@ -19,17 +6,9 @@ pub(crate) struct InitiateCospend {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub(crate) struct RegisterOutputs {
-    pub(crate) cospend_id: CospendId,
-    pub(crate) outputs: Vec<Output>,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum MessageType {
     /// Initiate a cospend with the receiver of payment
     RegisterCospend(InitiateCospend),
-    RegisterInput(RegisterInput),
-    RegisterOutputs(RegisterOutputs),
 }
 
 define_entity!(

@@ -193,14 +193,8 @@ impl<'a> WalletHandleMut<'a> {
                 continue;
             }
             match &message.message {
-                MessageType::RegisterInput(register_input) => {
-                    unimplemented!()
-                }
                 MessageType::RegisterCospend(initiate_cospend) => {
                     cospend_ids_to_process.push(initiate_cospend.cospend_id);
-                }
-                MessageType::RegisterOutputs(register_outputs) => {
-                    unimplemented!()
                 }
             }
         }
