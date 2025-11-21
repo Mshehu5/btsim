@@ -193,9 +193,9 @@ impl<'a> BroadcastSetHandleMut<'a> {
                                     .insert(*payment_obligation_id);
                             }
                             if let Some(cospend_id) =
-                                info.unconfirmed_txos_in_cospends.get(&input.id.into())
+                                info.unconfirmed_txos_in_payjoins.get(&input.id.into())
                             {
-                                info.payment_obligation_to_cospend
+                                info.payment_obligation_to_payjoin
                                     .iter()
                                     .find(|(_, c)| **c == *cospend_id)
                                     .map(|(payment_obligation_id, _)| {

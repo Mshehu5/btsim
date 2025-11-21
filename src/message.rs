@@ -9,7 +9,7 @@ pub(crate) struct PayjoinProposal {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum MessageType {
     /// Initiate a cospend with the receiver of payment
-    RegisterCospend(PayjoinProposal),
+    InitiatePayjoin(PayjoinProposal),
 }
 
 define_entity!(
