@@ -1,9 +1,11 @@
+use std::{iter::Sum, ops::Add};
+
 use bitcoin::Amount;
 
 use crate::{
     message::PayjoinProposal,
-    wallet::{PaymentObligationData, PaymentObligationId, WalletHandle, WalletHandleMut, WalletId},
-    Simulation, TimeStep,
+    wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut},
+    TimeStep,
 };
 
 /// An Action a wallet can perform
@@ -16,27 +18,29 @@ pub(crate) enum Action {
 
 /// Hypothetical outcomes of an action
 pub(crate) enum Event {
-    PaymentObligationHandled(PaymentObligationId),
-    PaymentObligationMissed(PaymentObligationId),
-    PayjoinProposalHandled(PayjoinProposal),
-    PayjoinOppurtunityMissed(PayjoinProposal),
-    PayjoinProposalCreated(PayjoinProposal),
-    PayjoinProposalMissed,
+    PaymentObligationHandled(PaymentObligationHandledEvent),
 }
 
-pub(crate) trait EventCost {
-    fn cost(&self, event: &Event) -> i32;
+pub(crate) struct PaymentObligationHandledEvent {
+    /// Payment obligation amount
+    amount_handled: Amount,
+    /// Balance difference after the action
+    balance_difference: Amount,
+    /// Time left on the payment obligation
+    time_left: i32,
 }
 
-struct PaymentObligationMissedCost {
-    payment_missed_lambda: f64,
-}
-
-struct EventEpisode<S: EventCost>(Vec<S>);
-
-impl<S: EventCost> EventCost for EventEpisode<S> {
-    fn cost(&self, event: &Event) -> i32 {
-        self.0.iter().map(|e| e.cost(event)).sum()
+impl PaymentObligationHandledEvent {
+    fn score(&self, payment_obligation_utility_factor: f64) -> ActionScore {
+        // TODO: Utility should be higher for earlier deadlines.
+        ActionScore(
+            self.balance_difference
+                .to_float_in(bitcoin::Denomination::Satoshi)
+                - (payment_obligation_utility_factor
+                    * self
+                        .amount_handled
+                        .to_float_in(bitcoin::Denomination::Satoshi)),
+        )
     }
 }
 
@@ -69,9 +73,40 @@ impl WalletView {
     }
 }
 
-// TODO: I dont think this needs an abstract type. This can just be a function?
-trait SimulateOneStep<S: EventCost> {
-    fn simulate_one_step(&self, action: &Action, wallet_view: &WalletView) -> EventEpisode<S>;
+fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<Event> {
+    let wallet_view = wallet_handle.wallet_view();
+    let mut events = vec![];
+    let old_info = wallet_handle.info().clone();
+    let old_balance = wallet_handle.handle().effective_balance();
+
+    // Deep clone the simulation
+    let mut sim = wallet_handle.sim.clone();
+    let mut predicated_wallet_handle = wallet_handle.data().id.with_mut(&mut sim);
+    predicated_wallet_handle.do_action(action);
+    let new_info = wallet_handle.info().clone();
+    let new_balance = wallet_handle.handle().effective_balance();
+
+    // Check for handled payment obligations -- we only handle one payment obligatoin per action. This may change in the future.
+    // We may also want to evaluate bundles of actions.
+    let handled_payment_obligations_diff = old_info
+        .handled_payment_obligations
+        .difference(new_info.handled_payment_obligations.clone())
+        .into_iter()
+        .next();
+    if let Some(payment_obligation) = handled_payment_obligations_diff {
+        let payment_obligation = payment_obligation.with(&sim).data();
+        let deadline = payment_obligation.deadline;
+
+        events.push(Event::PaymentObligationHandled(
+            PaymentObligationHandledEvent {
+                amount_handled: payment_obligation.amount,
+                balance_difference: old_balance - new_balance,
+                time_left: deadline.0 as i32 - wallet_view.current_timestep.0 as i32,
+            },
+        ));
+    }
+
+    events
 }
 
 /// Model payment obligation deadline anxiety as a cubic function of the time left.
@@ -83,18 +118,21 @@ fn deadline_anxiety(deadline: i32, current_time: i32) -> f64 {
 }
 
 /// Strategies will pick one action to minimize their cost
+/// TODO: Strategies should be composible. They should enform the action decision space scoring and doing actions should be handling by something else that has composed multiple strategies.
 pub(crate) trait Strategy {
     fn enumerate_candidate_actions(&self, state: &WalletView) -> impl Iterator<Item = Action>;
     fn do_something(&self, state: &WalletHandleMut) -> Action;
     fn score_action(&self, action: &Action, wallet_handle: &WalletHandleMut) -> ActionScore;
 }
 
-pub(crate) struct UnilateralSpender {
-    pub(crate) payment_obligation_utility_factor: f64,
-}
-
 #[derive(Debug, PartialEq, PartialOrd)]
 pub(crate) struct ActionScore(f64);
+
+impl Sum for ActionScore {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        Self(iter.map(|s| s.0).sum())
+    }
+}
 
 impl Eq for ActionScore {}
 
@@ -103,6 +141,17 @@ impl Ord for ActionScore {
         assert!(!self.0.is_nan() && !other.0.is_nan());
         self.0.partial_cmp(&other.0).expect("Checked for NaNs")
     }
+}
+
+impl Add for ActionScore {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        Self(self.0 + other.0)
+    }
+}
+
+pub(crate) struct UnilateralSpender {
+    pub(crate) payment_obligation_utility_factor: f64,
 }
 
 impl Strategy for UnilateralSpender {
@@ -122,9 +171,6 @@ impl Strategy for UnilateralSpender {
 
     fn do_something(&self, state: &WalletHandleMut) -> Action {
         let wallet_view = state.wallet_view();
-        if wallet_view.payment_obligations.is_empty() {
-            return Action::Wait;
-        }
         // Unilateral spender ignores any payjoin or cospend oppurtunities
         self.enumerate_candidate_actions(&wallet_view)
             .min_by_key(|action| self.score_action(action, state))
@@ -132,35 +178,16 @@ impl Strategy for UnilateralSpender {
     }
 
     fn score_action(&self, action: &Action, wallet_handle: &WalletHandleMut) -> ActionScore {
-        let old_info = wallet_handle.info().clone();
-        let old_balance = wallet_handle.handle().effective_balance();
-
-        // Deep clone the simulation
-        let mut sim = wallet_handle.sim.clone();
-        let mut predicated_wallet_handle = wallet_handle.data().id.with_mut(&mut sim);
-        // Simulate the action
-        predicated_wallet_handle.do_action(action);
-        let new_info = wallet_handle.info().clone();
-        let new_balance = wallet_handle.handle().effective_balance();
-
-        // Compute the difference in the handled payment obligations
-        let handled_payment_obligations_diff = old_info
-            .handled_payment_obligations
-            .difference(new_info.handled_payment_obligations.clone());
-
-        let amount_handled = handled_payment_obligations_diff
-            .iter()
-            .map(|po| po.with(&sim).data().amount)
-            .sum::<Amount>();
-
-        // Intuitively the utlity gained from this action should dominate the balance lost
-        // TODO; utility should be higher if the payment obligation is due soon
-        let diff = old_balance - new_balance;
-        // Action score is a satoshi amount but represents as a f64 for convenience. We should round and cast later.
-        ActionScore(
-            diff.to_float_in(bitcoin::Denomination::Satoshi)
-                - (self.payment_obligation_utility_factor
-                    * amount_handled.to_float_in(bitcoin::Denomination::Satoshi)),
-        )
+        let events = simulate_one_action(wallet_handle, action);
+        let mut score = ActionScore(0.0);
+        for event in events {
+            match event {
+                Event::PaymentObligationHandled(event) => {
+                    score = score + event.score(self.payment_obligation_utility_factor);
+                }
+                _ => (),
+            };
+        }
+        score
     }
 }
