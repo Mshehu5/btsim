@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    actions::{Action, Strategy, UnilateralSpender, WalletView},
+    actions::{Action, CompositeScorer, Strategy, UnilateralSpender, WalletView},
     blocks::{BroadcastSetHandleMut, BroadcastSetId},
     message::{MessageId, MessageType, PayjoinProposal},
     Simulation, TimeStep,
@@ -408,13 +408,15 @@ impl<'a> WalletHandleMut<'a> {
     }
 
     pub(crate) fn wake_up(&'a mut self) {
-        let strategy = UnilateralSpender {
+        let scorer = CompositeScorer {
+            payjoin_utility_factor: 0.01,
             payment_obligation_utility_factor: 0.01,
         };
+        let strategy = UnilateralSpender;
         let wallet_view = self.wallet_view();
         let action = strategy
             .enumerate_candidate_actions(&wallet_view)
-            .min_by_key(|action| strategy.score_action(action, self))
+            .min_by_key(|action| scorer.score_action(action, self))
             .unwrap_or(Action::Wait);
         self.do_action(&action);
 

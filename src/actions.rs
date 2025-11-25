@@ -170,7 +170,6 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
 /// TODO: Strategies should be composible. They should enform the action decision space scoring and doing actions should be handling by something else that has composed multiple strategies.
 pub(crate) trait Strategy {
     fn enumerate_candidate_actions(&self, state: &WalletView) -> impl Iterator<Item = Action>;
-    fn score_action(&self, action: &Action, wallet_handle: &WalletHandleMut) -> ActionScore;
 }
 
 #[derive(Debug, PartialEq, PartialOrd)]
@@ -198,9 +197,7 @@ impl Add for ActionScore {
     }
 }
 
-pub(crate) struct UnilateralSpender {
-    pub(crate) payment_obligation_utility_factor: f64,
-}
+pub(crate) struct UnilateralSpender;
 
 impl Strategy for UnilateralSpender {
     /// The decision space of the unilateral spender is the set of all payment obligations and payjoin proposals
@@ -216,24 +213,9 @@ impl Strategy for UnilateralSpender {
 
         actions.into_iter()
     }
-    fn score_action(&self, action: &Action, wallet_handle: &WalletHandleMut) -> ActionScore {
-        let events = simulate_one_action(wallet_handle, action);
-        let mut score = ActionScore(0.0);
-        for event in events {
-            match event {
-                Event::PaymentObligationHandled(event) => {
-                    score = score + event.score(self.payment_obligation_utility_factor);
-                }
-                _ => (),
-            };
-        }
-        score
-    }
 }
 
-pub(crate) struct PayjoinStrategy {
-    pub(crate) payjoin_utility_factor: f64,
-}
+pub(crate) struct PayjoinStrategy;
 
 impl Strategy for PayjoinStrategy {
     fn enumerate_candidate_actions(&self, state: &WalletView) -> impl Iterator<Item = Action> {
@@ -242,9 +224,7 @@ impl Strategy for PayjoinStrategy {
         }
         let mut actions = vec![];
         for po in state.payment_obligations.iter() {
-            // For every payment obligation, we can spend it unilaterally
-            actions.push(Action::UnilateralSpend(po.id));
-            // Or we can initiate a payjoin with out counterparty
+            // TODO: some payment obligations may not be suitable for payjoin. i.e if the receiver opts out
             actions.push(Action::InitiatePayjoin(po.id));
         }
 
@@ -260,16 +240,30 @@ impl Strategy for PayjoinStrategy {
 
         actions.into_iter()
     }
+}
 
-    fn score_action(&self, action: &Action, wallet_handle: &WalletHandleMut) -> ActionScore {
+// TODO: this should be a trait once we have different scoring strategies
+pub(crate) struct CompositeScorer {
+    pub(crate) payjoin_utility_factor: f64,
+    pub(crate) payment_obligation_utility_factor: f64,
+}
+
+impl CompositeScorer {
+    pub(crate) fn score_action(
+        &self,
+        action: &Action,
+        wallet_handle: &WalletHandleMut,
+    ) -> ActionScore {
         let events = simulate_one_action(wallet_handle, action);
         let mut score = ActionScore(0.0);
         for event in events {
             match event {
+                Event::PaymentObligationHandled(event) => {
+                    score = score + event.score(self.payment_obligation_utility_factor);
+                }
                 Event::InitiatePayjoin(event) => {
                     score = score + event.score(self.payjoin_utility_factor);
                 }
-                _ => (),
             }
         }
         score
