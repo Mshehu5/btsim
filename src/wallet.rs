@@ -303,37 +303,21 @@ impl<'a> WalletHandleMut<'a> {
         MessageData {
             id: message_id,
             from: self.id,
-            to: Some(payment_obligation.to),
+            to: payment_obligation.to,
             message: MessageType::InitiatePayjoin(payjoin_proposal),
         }
     }
 
     pub(crate) fn wallet_view(&self) -> WalletView {
-        let mut payjoins = Vec::new();
         let messages = self
             .sim
             .messages
             .iter()
             .filter(|message| !self.data().messages_processed.contains(&message.id))
+            .filter(|message| message.from != self.id && message.to == self.id)
             .cloned()
             .collect::<Vec<_>>();
-        let my_id = self.id;
-        for message in messages.iter() {
-            if message.from == my_id {
-                continue;
-            }
-            if message.to.is_none() {
-                continue;
-            }
-            if message.to.unwrap() != my_id {
-                continue;
-            }
-            match &message.message {
-                MessageType::InitiatePayjoin(payjoin_proposal) => {
-                    payjoins.push(payjoin_proposal.clone())
-                }
-            }
-        }
+
         let payment_obligations = self
             .info()
             .payment_obligations
@@ -377,7 +361,7 @@ impl<'a> WalletHandleMut<'a> {
             .into_iter()
             .max_by_key(|action| scorer.score_action(action, self))
             .unwrap_or(Action::Wait);
-        println!(">>>>> Chose action: {:?}", action);
+        println!(">>>>> Wallet id: {:?} chose action: {:?}", self.id, action);
         self.do_action(&action);
     }
 

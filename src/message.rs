@@ -19,7 +19,7 @@ define_entity!(
         pub(crate) message: MessageType,
         pub(crate) from: WalletId,
         // None if meant as a broadcast message
-        pub(crate) to: Option<WalletId>,
+        pub(crate) to: WalletId,
     },
     {
     }

@@ -150,7 +150,6 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
     let wallet_view = wallet_handle.wallet_view();
     let mut events = vec![];
     let old_info = wallet_handle.info().clone();
-    let old_balance = wallet_handle.handle().effective_balance();
 
     // Deep clone the simulation and run the action
     let wallet_id = wallet_handle.data().id;
@@ -159,13 +158,14 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
     new_wallet_handle.do_action(action);
     let new_wallet_handle = wallet_id.with(&sim);
     let new_info = new_wallet_handle.info();
-    let new_balance = new_wallet_handle.effective_balance();
 
-    let balance_difference = new_balance.to_float_in(bitcoin::Denomination::Satoshi)
-        - old_balance.to_float_in(bitcoin::Denomination::Satoshi);
     if let Action::UnilateralSpend(payment_obligation_id) = action {
         let payment_obligation = payment_obligation_id.with(&sim).data();
         let deadline = payment_obligation.deadline;
+        let balance_difference = payment_obligation
+            .amount
+            .to_float_in(bitcoin::Denomination::Satoshi)
+            * -1.0;
         events.push(Event::PaymentObligationHandled(
             PaymentObligationHandledEvent {
                 amount_handled: payment_obligation
@@ -187,7 +187,7 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
     {
         let po = payment_obligation_id.with(&sim).data();
         let amount_handled = po.amount.to_float_in(bitcoin::Denomination::Satoshi);
-        let balance_difference = amount_handled - 1.0; // TODO: fee's are not factored in yet
+        let balance_difference = amount_handled * -1.0; // TODO: fee's are not factored in yet
         events.push(Event::InitiatePayjoin(InitiatePayjoinEvent {
             time_left: po.deadline.0 as i32 - wallet_view.current_timestep.0 as i32,
             amount_handled,
@@ -205,7 +205,7 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
     {
         let po = payment_obligation_id.with(&sim).data();
         let amount_handled = po.amount.to_float_in(bitcoin::Denomination::Satoshi);
-        let balance_difference = amount_handled; // TODO: fee's are not factored in yet
+        let balance_difference = amount_handled * -1.0; // TODO: fee's are not factored in yet
         events.push(Event::RespondToPayjoin(RespondToPayjoinEvent {
             amount_handled,
             balance_difference,
