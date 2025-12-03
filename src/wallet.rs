@@ -361,8 +361,9 @@ impl<'a> WalletHandleMut<'a> {
 
     pub(crate) fn wake_up(&'a mut self) {
         let scorer = CompositeScorer {
-            payjoin_utility_factor: 2.0,
+            initiate_payjoin_utility_factor: 2.0,
             payment_obligation_utility_factor: 1.0,
+            respond_to_payjoin_utility_factor: 5.0,
         };
         let strategy = CompositeStrategy {
             strategies: vec![Box::new(UnilateralSpender), Box::new(PayjoinStrategy)],

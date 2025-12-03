@@ -312,7 +312,8 @@ impl Strategy for CompositeStrategy {
 }
 // TODO: this should be a trait once we have different scoring strategies
 pub(crate) struct CompositeScorer {
-    pub(crate) payjoin_utility_factor: f64,
+    pub(crate) initiate_payjoin_utility_factor: f64,
+    pub(crate) respond_to_payjoin_utility_factor: f64,
     pub(crate) payment_obligation_utility_factor: f64,
 }
 
@@ -333,10 +334,10 @@ impl CompositeScorer {
                     score = score + event.score(self.payment_obligation_utility_factor);
                 }
                 PredictedOutcome::InitiatePayjoin(event) => {
-                    score = score + event.score(self.payjoin_utility_factor);
+                    score = score + event.score(self.initiate_payjoin_utility_factor);
                 }
                 PredictedOutcome::RespondToPayjoin(event) => {
-                    score = score + event.score(self.payjoin_utility_factor);
+                    score = score + event.score(self.respond_to_payjoin_utility_factor);
                 }
             }
         }
