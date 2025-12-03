@@ -5,8 +5,11 @@ use graphviz_rust::{cmd::Format, dot_structures, printer::PrinterContext};
 use im::{OrdMap, OrdSet, Vector};
 use log::info;
 use petgraph::graph::{NodeIndex, UnGraph};
-use rand::{Rng, SeedableRng};
-use rand_chacha::ChaChaRng;
+use rand::Rng;
+use rand_distr::Distribution;
+use rand_distr::Geometric;
+use rand_pcg::rand_core::{RngCore, SeedableRng};
+use rand_pcg::Pcg64;
 
 use crate::{
     blocks::{
@@ -33,16 +36,16 @@ mod transaction;
 mod wallet;
 
 #[derive(Debug, Clone)]
-struct PrngFactory(ChaChaRng);
+struct PrngFactory(Pcg64);
 
 impl PrngFactory {
     fn new(seed: u64) -> Self {
-        Self(ChaChaRng::seed_from_u64(seed))
+        Self(Pcg64::seed_from_u64(seed))
     }
 
-    fn generate_prng(&mut self) -> ChaChaRng {
-        let seed = self.0.gen_range(0..u64::MAX);
-        ChaChaRng::seed_from_u64(seed)
+    fn generate_prng(&mut self) -> Pcg64 {
+        let seed = self.0.next_u64();
+        Pcg64::seed_from_u64(seed)
     }
 }
 
@@ -142,7 +145,7 @@ struct PeerGraph(UnGraph<usize, ()>);
 
 /// Wrapper type for timestep index
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Default)]
-pub(crate) struct TimeStep(usize);
+pub(crate) struct TimeStep(u64);
 
 #[derive(Debug)]
 pub struct SimulationBuilder {
@@ -152,7 +155,7 @@ pub struct SimulationBuilder {
     /// Total number of timesteps for the simulation
     max_timestep: TimeStep,
     /// How many blocks are mined between timesteps
-    block_interval: usize,
+    block_interval: u64,
     /// Number of payment obligations to create
     num_payment_obligations: usize,
 }
@@ -160,8 +163,8 @@ pub struct SimulationBuilder {
 impl SimulationBuilder {
     pub fn new_random(
         num_wallets: usize,
-        max_timestep: usize,
-        block_interval: usize,
+        max_timestep: u64,
+        block_interval: u64,
         num_payment_obligations: usize,
     ) -> Self {
         debug_assert!(num_wallets >= 2);
@@ -178,8 +181,8 @@ impl SimulationBuilder {
     pub fn new(
         seed: u64,
         num_wallets: usize,
-        max_timestep: usize,
-        block_interval: usize,
+        max_timestep: u64,
+        block_interval: u64,
         num_payment_obligations: usize,
     ) -> Self {
         debug_assert!(num_wallets >= 2);
@@ -283,7 +286,7 @@ impl SimulationBuilder {
 struct SimulationConfig {
     num_wallets: usize,
     max_timestep: TimeStep,
-    block_interval: usize,
+    block_interval: u64,
     num_payment_obligations: usize,
 }
 
@@ -301,7 +304,7 @@ pub struct Simulation {
     current_timestep: TimeStep,
     prng_factory: PrngFactory,
     peer_graph: PeerGraph,
-    economic_graph: EconomicGraph<ChaChaRng>,
+    economic_graph: EconomicGraph<Pcg64>,
     config: SimulationConfig,
     /// Append only vector of messages
     messages: Vec<MessageData>,
@@ -400,21 +403,32 @@ impl<'a> Simulation {
             // Not enough timesteps left to create a payment obligation
             return;
         }
+        let current_timestep = 0;
         let mut i = 0;
         while i < self.config.num_payment_obligations {
             for (from, to) in self.economic_graph.next_ordered_payment_pairs() {
                 debug_assert!(from != to, "circular payment obligation");
                 // TODO: should be a configurable or dependent on the balance of each wallet?
-                let deadline =
-                    prng.gen_range(self.current_timestep.0 + 1..self.config.max_timestep.0);
+                let reveal_time =
+                    prng.gen_range(current_timestep + 1..self.config.max_timestep.0 / 2); // Payments shouldnt be revealed too late. Aim to have them revealed within the first half of the simulation.
+                let deadline = reveal_time
+                    + std::cmp::min(
+                        self.config.max_timestep.0,
+                        Geometric::new(1.0 / (self.config.max_timestep.0 as f64 / 2.0))
+                            .unwrap()
+                            .sample(&mut prng),
+                    );
+                // TODO: instead of hardcoded average amount we should predict the balance of each wallet
+                let amount = Geometric::new(1.0 / 10_000.0).unwrap().sample(&mut prng);
                 // First insert payment obligation into simulation
                 let payment_obligation_id = PaymentObligationId(self.payment_data.len());
                 self.payment_data.push(PaymentObligationData {
                     id: payment_obligation_id,
-                    amount: Amount::from_sat(prng.gen_range(500..100_000)),
+                    amount: Amount::from_sat(amount),
                     from,
                     to,
                     deadline: TimeStep(deadline),
+                    reveal_time: TimeStep(reveal_time),
                 });
 
                 // Then insert into to_wallet's expected payments
@@ -476,7 +490,6 @@ impl<'a> Simulation {
         let tx_info = TxInfo::new(&tx, self);
 
         // TODO check all inputs unspent
-
         // TODO check transaction validity, calculate input values, feerate, weight
 
         for (i, input) in tx.inputs.iter().enumerate() {
@@ -761,6 +774,7 @@ mod tests {
             from: WalletId(0),
             to: bob,
             deadline: TimeStep(2), // TODO 102
+            reveal_time: TimeStep(1),
         };
         sim.assert_invariants();
 

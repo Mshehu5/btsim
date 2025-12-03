@@ -336,6 +336,7 @@ impl<'a> WalletHandleMut<'a> {
             .difference(initiated_po_ids)
             .difference(received_po_ids)
             .iter()
+            .filter(|po| po.with(self.sim).data().reveal_time <= self.sim.current_timestep)
             .map(|po| po.with(self.sim).data().clone())
             .collect::<Vec<_>>();
         WalletView::new(payment_obligations, messages, self.sim.current_timestep)
@@ -448,6 +449,7 @@ define_entity!(
     {
         pub(crate) id: PaymentObligationId,
         pub(crate) deadline: TimeStep,
+        pub(crate) reveal_time: TimeStep,
         pub(crate) amount: Amount,
         pub(crate) from: WalletId,
         pub(crate) to: WalletId,

@@ -208,8 +208,9 @@ dependencies = [
  "log",
  "paste",
  "petgraph 0.8.3",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
+ "rand 0.9.2",
+ "rand_distr",
+ "rand_pcg",
  "rustworkx-core",
 ]
 

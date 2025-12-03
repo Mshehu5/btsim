@@ -8,9 +8,9 @@ struct Args {
     #[arg(short, long)]
     payment_obligations: usize,
     #[arg(short, long)]
-    time_steps: usize,
+    time_steps: u64,
     #[arg(short, long)]
-    block_interval: usize,
+    block_interval: u64,
     #[arg(short, long)]
     seed: Option<u64>,
 }
