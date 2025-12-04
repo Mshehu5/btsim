@@ -189,11 +189,11 @@ impl<'a> BroadcastSetHandleMut<'a> {
 
                             // First check if this transaction directly handles a payment obligation
                             // This covers both unilateral spends and payjoins where we participated
-                            if let Some(payment_obligation_id) =
-                                info.txid_to_handle_payment_obligation.get(tx)
+                            if let Some(payment_obligation_ids) =
+                                info.txid_to_payment_obligation_ids.get(tx)
                             {
                                 info.handled_payment_obligations
-                                    .insert(*payment_obligation_id);
+                                    .extend(payment_obligation_ids.iter().map(|id| *id));
                             } else {
                                 // Only check payjoin lookups if the transaction isn't already
                                 // in txid_to_handle_payment_obligation to avoid duplicate handling

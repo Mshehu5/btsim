@@ -460,7 +460,8 @@ impl<'a> Simulation {
             unconfirmed_txos_in_payjoins: im::HashMap::<Outpoint, MessageId>::default(),
             initiated_payjoins: im::HashMap::<PaymentObligationId, MessageId>::default(),
             received_payjoins: im::HashMap::<PaymentObligationId, MessageId>::default(),
-            txid_to_handle_payment_obligation: im::HashMap::<TxId, PaymentObligationId>::default(),
+            txid_to_payment_obligation_ids: im::HashMap::<TxId, Vec<PaymentObligationId>>::default(
+            ),
             handled_payment_obligations: OrdSet::<PaymentObligationId>::default(),
         });
 

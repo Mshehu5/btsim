@@ -6,7 +6,7 @@ use log::debug;
 use crate::{
     message::{MessageData, MessageId, MessageType, PayjoinProposal},
     wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut},
-    TimeStep,
+    Simulation, TimeStep,
 };
 
 /// An Action a wallet can perform
@@ -14,6 +14,8 @@ use crate::{
 pub(crate) enum Action {
     /// Spend a payment obligation unilaterally
     UnilateralSpend(PaymentObligationId),
+    /// Batch spend multiple payment obligations
+    BatchSpend(Vec<PaymentObligationId>),
     /// Initiate a payjoin with a counterparty
     InitiatePayjoin(PaymentObligationId),
     /// respond to a payjoin proposal
@@ -25,7 +27,7 @@ pub(crate) enum Action {
 /// Hypothetical outcomes of an action
 #[derive(Debug)]
 pub(crate) enum PredictedOutcome {
-    PaymentObligationHandled(PaymentObligationHandledOutcome),
+    PaymentObligationsHandled(Vec<PaymentObligationHandledOutcome>),
     InitiatePayjoin(InitiatePayjoinOutcome),
     RespondToPayjoin(RespondToPayjoinOutcome),
 }
@@ -142,7 +144,25 @@ impl WalletView {
         }
     }
 }
-
+fn get_payment_obligation_handled_outcome(
+    payment_obligation_id: &PaymentObligationId,
+    sim: &Simulation,
+    current_timestep: TimeStep,
+) -> PaymentObligationHandledOutcome {
+    let payment_obligation = payment_obligation_id.with(&sim).data();
+    let deadline = payment_obligation.deadline;
+    let balance_difference = payment_obligation
+        .amount
+        .to_float_in(bitcoin::Denomination::Satoshi)
+        * -1.0;
+    PaymentObligationHandledOutcome {
+        amount_handled: payment_obligation
+            .amount
+            .to_float_in(bitcoin::Denomination::Satoshi),
+        balance_difference,
+        time_left: deadline.0 as i32 - current_timestep.0 as i32,
+    }
+}
 fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<PredictedOutcome> {
     let wallet_view = wallet_handle.wallet_view();
     let mut events = vec![];
@@ -163,7 +183,7 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
             .amount
             .to_float_in(bitcoin::Denomination::Satoshi)
             * -1.0;
-        events.push(PredictedOutcome::PaymentObligationHandled(
+        events.push(PredictedOutcome::PaymentObligationsHandled(vec![
             PaymentObligationHandledOutcome {
                 amount_handled: payment_obligation
                     .amount
@@ -171,7 +191,19 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
                 balance_difference,
                 time_left: deadline.0 as i32 - wallet_view.current_timestep.0 as i32,
             },
-        ));
+        ]));
+    }
+
+    if let Action::BatchSpend(payment_obligation_ids) = action {
+        let mut outcomes = vec![];
+        for payment_obligation_id in payment_obligation_ids.iter() {
+            outcomes.push(get_payment_obligation_handled_outcome(
+                payment_obligation_id,
+                &sim,
+                wallet_view.current_timestep,
+            ));
+        }
+        events.push(PredictedOutcome::PaymentObligationsHandled(outcomes));
     }
 
     // Check if the wallet initiated a payjoin
@@ -264,6 +296,23 @@ impl Strategy for UnilateralSpender {
     }
 }
 
+pub(crate) struct BatchSpender;
+
+impl Strategy for BatchSpender {
+    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+        if state.payment_obligations.is_empty() {
+            return vec![Action::Wait];
+        }
+        // TODO: we may need to consider differnt partitioning strategies for the batch spend
+        // Maybe some partitions have higher utility if batched than others that have longer deadlines
+        let mut payment_obligation_ids: Vec<PaymentObligationId> = vec![];
+        for po in state.payment_obligations.iter() {
+            payment_obligation_ids.push(po.id);
+        }
+        vec![Action::BatchSpend(payment_obligation_ids)]
+    }
+}
+
 pub(crate) struct PayjoinStrategy;
 
 impl Strategy for PayjoinStrategy {
@@ -330,8 +379,10 @@ impl CompositeScorer {
         let mut score = ActionScore(0.0);
         for event in events {
             match event {
-                PredictedOutcome::PaymentObligationHandled(event) => {
-                    score = score + event.score(self.payment_obligation_utility_factor);
+                PredictedOutcome::PaymentObligationsHandled(outcomes) => {
+                    for outcome in outcomes.iter() {
+                        score = score + outcome.score(self.payment_obligation_utility_factor);
+                    }
                 }
                 PredictedOutcome::InitiatePayjoin(event) => {
                     score = score + event.score(self.initiate_payjoin_utility_factor);

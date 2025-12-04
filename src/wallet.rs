@@ -1,7 +1,7 @@
 use crate::{
     actions::{
-        Action, CompositeScorer, CompositeStrategy, PayjoinStrategy, Strategy, UnilateralSpender,
-        WalletView,
+        Action, BatchSpender, CompositeScorer, CompositeStrategy, PayjoinStrategy, Strategy,
+        UnilateralSpender, WalletView,
     },
     blocks::{BroadcastSetHandleMut, BroadcastSetId},
     message::{MessageData, MessageId, MessageType, PayjoinProposal},
@@ -46,7 +46,7 @@ define_entity_mut_updatable!(
         pub(crate) unconfirmed_txos_in_payjoins: HashMap<Outpoint, MessageId>,
         /// Map of txids to the payment obligations that they are associated with
         /// Sim state should refrence this when updating wallet states after confirmation
-        pub(crate) txid_to_handle_payment_obligation: HashMap<TxId, PaymentObligationId>,
+        pub(crate) txid_to_payment_obligation_ids: HashMap<TxId, Vec<PaymentObligationId>>,
 
         /// Set of payment obligations that have been handled
         pub(crate) handled_payment_obligations: OrdSet<PaymentObligationId>,
@@ -192,11 +192,13 @@ impl<'a> WalletHandleMut<'a> {
     /// stateless utility function to construct a transaction for a given payment obligation
     fn construct_transaction_template(
         &self,
-        obligation: &PaymentObligationData,
+        amount_and_destination: Vec<(Amount, AddressId)>,
         change_addr: &AddressId,
-        to_address: &AddressId,
     ) -> TxData {
-        let amount = obligation.amount.to_sat();
+        let amount = amount_and_destination
+            .iter()
+            .map(|(amount, _)| amount.to_sat())
+            .sum();
         let target = Target {
             fee: TargetFee {
                 rate: bdk_coin_select::FeeRate::from_sat_per_vb(1.0),
@@ -205,28 +207,30 @@ impl<'a> WalletHandleMut<'a> {
             outputs: TargetOutputs {
                 value_sum: amount,
                 weight_sum: 34, // TODO use payment.to to derive an address, payment.into() ?
-                n_outputs: 1,
+                n_outputs: amount_and_destination.len(),
             },
         };
         let long_term_feerate = bitcoin::FeeRate::from_sat_per_vb(10).expect("valid fee rate");
 
         let (selected_coins, drain) = self.select_coins(target, long_term_feerate);
         let mut tx = TxData::default();
+        let mut outputs = vec![];
+        for (amount, address_id) in amount_and_destination.iter() {
+            outputs.push(Output {
+                amount: *amount,
+                address_id: *address_id,
+            });
+        }
+        outputs.push(Output {
+            amount: Amount::from_sat(drain.value),
+            address_id: *change_addr,
+        });
         tx.inputs = selected_coins
             .map(|o| Input {
                 outpoint: o.outpoint,
             })
             .collect();
-        tx.outputs = vec![
-            Output {
-                amount: Amount::from_sat(amount),
-                address_id: *to_address,
-            },
-            Output {
-                amount: Amount::from_sat(drain.value),
-                address_id: *change_addr,
-            },
-        ];
+        tx.outputs = outputs;
         tx
     }
 
@@ -240,8 +244,10 @@ impl<'a> WalletHandleMut<'a> {
         let payment_obligation = payment_obligation_id.with(self.sim).data().clone();
         let change_addr = self.new_address();
         let to_address = payment_obligation.to.with_mut(self.sim).new_address();
-        let mut tx_template =
-            self.construct_transaction_template(&payment_obligation, &change_addr, &to_address);
+        let mut tx_template = self.construct_transaction_template(
+            vec![(payment_obligation.amount, to_address)],
+            &change_addr,
+        );
         // "Lock" The inputs to this payjoin. These inputs can be spent if the payjoin is expired and our payment is due soon
         for input in tx_template.inputs.iter() {
             self.info_mut()
@@ -281,8 +287,10 @@ impl<'a> WalletHandleMut<'a> {
         let message_id = MessageId(self.sim.messages.len());
         let change_addr = self.new_address();
         let to_address = payment_obligation.to.with_mut(self.sim).new_address();
-        let mut tx_template =
-            self.construct_transaction_template(&payment_obligation, &change_addr, &to_address);
+        let mut tx_template = self.construct_transaction_template(
+            vec![(payment_obligation.amount, to_address)],
+            &change_addr,
+        );
         self.ack_transaction(&mut tx_template);
         debug_assert!(tx_template.wallet_acks.contains(&self.id));
         let payjoin_proposal = PayjoinProposal {
@@ -345,7 +353,10 @@ impl<'a> WalletHandleMut<'a> {
         match action {
             Action::Wait => {}
             Action::UnilateralSpend(po) => {
-                let _ = self.handle_payment_obligation(po);
+                self.handle_payment_obligations(&[*po]);
+            }
+            Action::BatchSpend(po_ids) => {
+                self.handle_payment_obligations(po_ids);
             }
             Action::InitiatePayjoin(po) => {
                 let message = self.create_payjoin(po);
@@ -365,7 +376,11 @@ impl<'a> WalletHandleMut<'a> {
             respond_to_payjoin_utility_factor: 5.0,
         };
         let strategy = CompositeStrategy {
-            strategies: vec![Box::new(UnilateralSpender), Box::new(PayjoinStrategy)],
+            strategies: vec![
+                Box::new(UnilateralSpender),
+                Box::new(BatchSpender),
+                Box::new(PayjoinStrategy),
+            ],
         };
         let action = strategy
             .enumerate_candidate_actions(&self.wallet_view())
@@ -376,24 +391,24 @@ impl<'a> WalletHandleMut<'a> {
         self.do_action(&action);
     }
 
-    fn handle_payment_obligation(
-        &'a mut self,
-        payment_obligation_id: &PaymentObligationId,
-    ) -> TxId {
-        let payment_obligation = payment_obligation_id.with(&self.sim).data().clone();
+    fn handle_payment_obligations(&'a mut self, payment_obligation_ids: &[PaymentObligationId]) {
+        let mut amount_and_destination = vec![];
+        for payment_obligation_id in payment_obligation_ids.iter() {
+            let payment_obligation = payment_obligation_id.with(&self.sim).data().clone();
+            let to_wallet = payment_obligation.to;
+            let to_address = to_wallet.with_mut(self.sim).new_address();
+            amount_and_destination.push((payment_obligation.amount, to_address));
+        }
         let change_addr = self.new_address();
-        let to_wallet = payment_obligation.to;
-        let to_address = to_wallet.with_mut(self.sim).new_address();
         let mut tx_template =
-            self.construct_transaction_template(&payment_obligation, &change_addr, &to_address);
+            self.construct_transaction_template(amount_and_destination, &change_addr);
         self.ack_transaction(&mut tx_template);
 
         let tx_id = self.spend_tx(tx_template);
         self.info_mut()
-            .txid_to_handle_payment_obligation
-            .insert(tx_id, *payment_obligation_id);
+            .txid_to_payment_obligation_ids
+            .insert(tx_id, payment_obligation_ids.to_vec());
         self.broadcast(vec![tx_id]);
-        tx_id
     }
 
     fn ack_transaction(&self, tx: &mut TxData) {
