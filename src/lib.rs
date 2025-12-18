@@ -11,6 +11,9 @@ use rand_distr::Geometric;
 use rand_pcg::rand_core::{RngCore, SeedableRng};
 use rand_pcg::Pcg64;
 
+use crate::bulletin_board::BroadcastMessageType;
+use crate::bulletin_board::BulletinBoardData;
+use crate::bulletin_board::BulletinBoardId;
 use crate::{
     actions::{create_strategy, CompositeScorer, CompositeStrategy},
     blocks::{
@@ -31,6 +34,7 @@ use crate::{
 mod macros;
 mod actions;
 mod blocks;
+mod bulletin_board;
 pub mod config;
 mod economic_graph;
 mod graphviz;
@@ -222,6 +226,7 @@ impl SimulationBuilder {
             tx_info: Vec::new(),
             broadcast_set_info: Vec::new(),
             messages: Vec::new(),
+            bulletin_boards: Vec::new(),
             economic_graph: EconomicGraph::new(3, economic_graph_prng),
             config: SimulationConfig {
                 num_wallets: self.total_wallets(),
@@ -317,8 +322,11 @@ pub struct Simulation {
     peer_graph: PeerGraph,
     economic_graph: EconomicGraph<Pcg64>,
     config: SimulationConfig,
-    /// Append only vector of messages
+    /// Append only vector of p2p messages
     messages: Vec<MessageData>,
+
+    /// Broadcast bulletin boards
+    bulletin_boards: Vec<BulletinBoardData>,
 
     // secondary information (indexes)
     /// Map of outpoints to the set of (txid, input index) pairs that spend them
@@ -398,6 +406,25 @@ impl<'a> Simulation {
         miner.with_mut(self).new_address()
     }
 
+    fn create_bulletin_board(&mut self) -> BulletinBoardId {
+        let id = BulletinBoardId(self.bulletin_boards.len());
+        self.bulletin_boards.push(BulletinBoardData {
+            id,
+            messages: Vec::new(),
+        });
+        id
+    }
+
+    fn add_message_to_bulletin_board(
+        &mut self,
+        bulletin_board_id: BulletinBoardId,
+        message: BroadcastMessageType,
+    ) {
+        self.bulletin_boards[bulletin_board_id.0]
+            .messages
+            .push(message);
+    }
+
     fn broadcast_message(&mut self, message: MessageData) {
         self.messages.push(message);
     }
@@ -471,9 +498,9 @@ impl<'a> Simulation {
             unconfirmed_txos: OrdSet::<Outpoint>::default(),
             confirmed_utxos: OrdSet::<Outpoint>::default(),
             unconfirmed_spends: OrdSet::<Outpoint>::default(),
-            unconfirmed_txos_in_payjoins: im::HashMap::<Outpoint, MessageId>::default(),
-            initiated_payjoins: im::HashMap::<PaymentObligationId, MessageId>::default(),
-            received_payjoins: im::HashMap::<PaymentObligationId, MessageId>::default(),
+            unconfirmed_txos_in_payjoins: im::HashMap::<Outpoint, BulletinBoardId>::default(),
+            initiated_payjoins: im::HashMap::<PaymentObligationId, BulletinBoardId>::default(),
+            received_payjoins: im::HashMap::<PaymentObligationId, BulletinBoardId>::default(),
             txid_to_payment_obligation_ids: im::HashMap::<TxId, Vec<PaymentObligationId>>::default(
             ),
             handled_payment_obligations: OrdSet::<PaymentObligationId>::default(),

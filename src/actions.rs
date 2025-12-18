@@ -4,7 +4,8 @@ use bitcoin::Amount;
 use log::debug;
 
 use crate::{
-    message::{MessageData, MessageId, MessageType, PayjoinProposal},
+    bulletin_board::BulletinBoardId,
+    message::{MessageId, PayjoinProposal},
     wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut},
     Simulation, TimeStep,
 };
@@ -46,7 +47,12 @@ pub(crate) enum Action {
     /// Initiate a payjoin with a counterparty
     InitiatePayjoin(PaymentObligationId),
     /// respond to a payjoin proposal
-    RespondToPayjoin(PayjoinProposal, PaymentObligationId, MessageId),
+    RespondToPayjoin(
+        PayjoinProposal,
+        PaymentObligationId,
+        BulletinBoardId,
+        MessageId,
+    ),
     /// Do nothing. There may be better oppurtunities to spend a payment obligation or participate in a payjoin.
     Wait,
 }
@@ -143,7 +149,7 @@ impl RespondToPayjoinOutcome {
 #[derive(Debug, Default)]
 pub(crate) struct WalletView {
     payment_obligations: Vec<PaymentObligationData>,
-    messages: Vec<MessageData>,
+    payjoin_proposals: Vec<(MessageId, BulletinBoardId, PayjoinProposal)>,
     current_timestep: TimeStep,
     // TODO: utxos, feerate, cospend oppurtunities, etc.
 }
@@ -151,12 +157,12 @@ pub(crate) struct WalletView {
 impl WalletView {
     pub(crate) fn new(
         payment_obligations: Vec<PaymentObligationData>,
-        messages: Vec<MessageData>,
+        payjoin_proposals: Vec<(MessageId, BulletinBoardId, PayjoinProposal)>,
         current_timestep: TimeStep,
     ) -> Self {
         Self {
             payment_obligations,
-            messages,
+            payjoin_proposals,
             current_timestep,
         }
     }
@@ -356,18 +362,15 @@ impl Strategy for PayjoinStrategy {
         }
 
         // Check for messages from other wallets
-        for message in state.messages.iter() {
-            match &message.message {
-                MessageType::InitiatePayjoin(payjoin_proposal) => {
-                    // We should evaluate responding using all payment obligations that have not been handled
-                    for po in state.payment_obligations.iter() {
-                        actions.push(Action::RespondToPayjoin(
-                            payjoin_proposal.clone(),
-                            po.id,
-                            message.id,
-                        ));
-                    }
-                }
+        for (message_id, bulletin_board_id, payjoin_proposal) in state.payjoin_proposals.iter() {
+            // We should evaluate responding using all payment obligations that have not been handled
+            for po in state.payment_obligations.iter() {
+                actions.push(Action::RespondToPayjoin(
+                    payjoin_proposal.clone(),
+                    po.id,
+                    *bulletin_board_id,
+                    *message_id,
+                ));
             }
         }
 

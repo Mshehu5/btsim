@@ -1,4 +1,4 @@
-use crate::{transaction::TxData, wallet::WalletId, TimeStep};
+use crate::{bulletin_board::BulletinBoardId, transaction::TxData, wallet::WalletId, TimeStep};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct PayjoinProposal {
@@ -9,7 +9,7 @@ pub(crate) struct PayjoinProposal {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum MessageType {
     /// Initiate a cospend with the receiver of payment
-    InitiatePayjoin(PayjoinProposal),
+    InitiatePayjoin(BulletinBoardId),
 }
 
 define_entity!(

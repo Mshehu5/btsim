@@ -1,6 +1,7 @@
 use crate::{
-    actions::{Action, CompositeScorer, CompositeStrategy, Strategy, WalletView},
+    actions::{Action, CompositeScorer, CompositeStrategy, WalletView},
     blocks::{BroadcastSetHandleMut, BroadcastSetId},
+    bulletin_board::{BroadcastMessageType, BulletinBoardId},
     message::{MessageData, MessageId, MessageType, PayjoinProposal},
     Simulation, TimeStep,
 };
@@ -38,12 +39,13 @@ define_entity_info!(Wallet, {
         pub(crate) unconfirmed_txos: OrdSet<Outpoint>,  // compute CPFP cost
         pub(crate) unconfirmed_spends: OrdSet<Outpoint>, // RBFable
         /// Payjoins that I sent to other wallets
-        pub(crate) initiated_payjoins: HashMap<PaymentObligationId, MessageId>,
+        pub(crate) initiated_payjoins: HashMap<PaymentObligationId, BulletinBoardId>,
         /// Payjoins that I received from other wallets. A mapping of what payment obligation was used in this payjoin
-        pub(crate) received_payjoins: HashMap<PaymentObligationId, MessageId>,
+        pub(crate) received_payjoins: HashMap<PaymentObligationId, BulletinBoardId>,
         /// Map of unconfirmed txos to the cospends that they are in
         // TODO: need something similar for outputs as to prevent double spending to the same payment obligation
-        pub(crate) unconfirmed_txos_in_payjoins: HashMap<Outpoint, MessageId>,
+        // TODO: generalize this to other type of interactive protocols
+        pub(crate) unconfirmed_txos_in_payjoins: HashMap<Outpoint, BulletinBoardId>,
         /// Map of txids to the payment obligations that they are associated with
         /// Sim state should refrence this when updating wallet states after confirmation
         pub(crate) txid_to_payment_obligation_ids: HashMap<TxId, Vec<PaymentObligationId>>,
@@ -237,6 +239,7 @@ impl<'a> WalletHandleMut<'a> {
     fn participate_in_payjoin(
         &mut self,
         message_id: &MessageId,
+        bulletin_board_id: &BulletinBoardId,
         payjoin: &PayjoinProposal,
         payment_obligation_id: &PaymentObligationId,
     ) -> TxId {
@@ -252,7 +255,7 @@ impl<'a> WalletHandleMut<'a> {
         for input in tx_template.inputs.iter() {
             self.info_mut()
                 .unconfirmed_txos_in_payjoins
-                .insert(input.outpoint, *message_id);
+                .insert(input.outpoint, *bulletin_board_id);
         }
 
         self.ack_transaction(&mut tx_template);
@@ -270,7 +273,7 @@ impl<'a> WalletHandleMut<'a> {
         // Keep an index of what payment obligations are being handled in which payjoins
         self.info_mut()
             .received_payjoins
-            .insert(*payment_obligation_id, *message_id);
+            .insert(*payment_obligation_id, *bulletin_board_id);
 
         // Mark the message as processed
         self.data_mut().messages_processed.insert(*message_id);
@@ -298,20 +301,25 @@ impl<'a> WalletHandleMut<'a> {
             valid_till: payment_obligation.deadline,
         };
         // "Lock" The inputs to this cospend. These inputs can be spent if the cospend is expired and our payment is due soon
+        let bulletin_board_id = self.sim.create_bulletin_board();
         for input in payjoin_proposal.tx.inputs.iter() {
             self.info_mut()
                 .unconfirmed_txos_in_payjoins
-                .insert(input.outpoint, message_id);
+                .insert(input.outpoint, bulletin_board_id);
         }
         self.info_mut()
             .initiated_payjoins
-            .insert(payment_obligation.id, message_id);
+            .insert(payment_obligation.id, bulletin_board_id);
 
+        self.sim.add_message_to_bulletin_board(
+            bulletin_board_id,
+            BroadcastMessageType::InitiatePayjoin(payjoin_proposal),
+        );
         MessageData {
             id: message_id,
             from: self.id,
             to: payment_obligation.to,
-            message: MessageType::InitiatePayjoin(payjoin_proposal),
+            message: MessageType::InitiatePayjoin(bulletin_board_id),
         }
     }
 
@@ -325,6 +333,30 @@ impl<'a> WalletHandleMut<'a> {
             .cloned()
             .collect::<Vec<_>>();
         let wallet_info = self.info();
+        // Extract just the payjoin proposals we have not processed yet
+        let payjoin_proposals = messages
+            .iter()
+            .filter_map(|message| match &message.message {
+                MessageType::InitiatePayjoin(bulletin_board_id) => {
+                    let payjoin_proposal = bulletin_board_id
+                        .with(self.sim)
+                        .data()
+                        .messages
+                        .iter()
+                        .find_map(|message| match message {
+                            BroadcastMessageType::InitiatePayjoin(payjoin_proposal) => {
+                                Some(payjoin_proposal.clone())
+                            }
+                            _ => None,
+                        });
+                    if let Some(payjoin_proposal) = payjoin_proposal {
+                        Some((message.id, *bulletin_board_id, payjoin_proposal.clone()))
+                    } else {
+                        None
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
 
         // Filter out payment obligations that are already handled, or have an initiated/received payjoin
         // TODO: in the future where we want to support fallbacks we should not filter out initiated payjoins
@@ -346,7 +378,11 @@ impl<'a> WalletHandleMut<'a> {
             .filter(|po| po.with(self.sim).data().reveal_time <= self.sim.current_timestep)
             .map(|po| po.with(self.sim).data().clone())
             .collect::<Vec<_>>();
-        WalletView::new(payment_obligations, messages, self.sim.current_timestep)
+        WalletView::new(
+            payment_obligations,
+            payjoin_proposals,
+            self.sim.current_timestep,
+        )
     }
 
     pub(crate) fn do_action(&'a mut self, action: &Action) {
@@ -362,8 +398,13 @@ impl<'a> WalletHandleMut<'a> {
                 let message = self.create_payjoin(po);
                 self.sim.broadcast_message(message);
             }
-            Action::RespondToPayjoin(payjoin_proposal, po, message_id) => {
-                let tx_id = self.participate_in_payjoin(message_id, payjoin_proposal, po);
+            Action::RespondToPayjoin(payjoin_proposal, po, bulletin_board_id, message_id) => {
+                let tx_id = self.participate_in_payjoin(
+                    message_id,
+                    bulletin_board_id,
+                    payjoin_proposal,
+                    po,
+                );
                 self.broadcast(vec![tx_id]);
             }
         }
