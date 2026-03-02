@@ -796,11 +796,10 @@ mod tests {
             "Not all obligations should be missed"
         );
 
-        // Assert reasonable missed percentage (adjust threshold as needed)
-        let missed_percentage = result.percentage_of_payment_obligations_missed();
-        assert!(
-            missed_percentage >= 0.0 && missed_percentage <= 1.0,
-            "Missed percentage should be between 0 and 1"
+        assert_eq!(
+            result.percentage_of_payment_obligations_missed(),
+            0.5384615384615384,
+            "With seed 42, missed percentage should be deterministic"
         );
     }
 
