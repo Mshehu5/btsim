@@ -37,6 +37,21 @@ fn piecewise_linear(x: f64, points: &[(f64, f64)]) -> f64 {
     unreachable!("x did not fall into any segment; are points sorted?");
 }
 
+fn payment_obligation_urgency_score(
+    amount: f64,
+    balance_difference: f64,
+    time_left: i32,
+    payment_obligation_weight: f64,
+) -> ActionCost {
+    let points = [
+        (0.0, 2.0 * payment_obligation_weight),
+        (2.0, payment_obligation_weight),
+        (5.0, 0.0),
+    ];
+    let utility = piecewise_linear(time_left as f64, &points);
+    ActionCost(balance_difference + (amount * utility))
+}
+
 /// An Action a wallet can perform
 #[derive(Debug)]
 pub(crate) enum Action {
@@ -51,7 +66,9 @@ pub(crate) enum Action {
     ParticipateMultiPartyPayjoin((MessageId, BulletinBoardId, PaymentObligationId)),
     /// Continue to participate in a multi-party payjoin
     ContinueParticipateMultiPartyPayjoin(BulletinBoardId),
-    /// Do nothing. There may be better opportunities to spend a payment obligation or participate in a multi-party payjoin.
+    /// Abandon a pending multi-party payjoin, freeing its committed UTXOs
+    AbandonMultiPartyPayjoin(PaymentObligationId),
+    /// Do nothing. There may be better oppurtunities to spend a payment obligation or participate in a payjoin.
     Wait,
 }
 
@@ -143,6 +160,8 @@ pub(crate) struct WalletView {
     current_timestep: TimeStep,
     wallet_id: WalletId,
     // TODO: utxos, feerate, cospend oppurtunities, etc.
+    /// Payment obligations currently in pending payjoins (candidates for AbandonMultiPartyPayjoin)
+    pub(crate) payjoin_pending_pos: Vec<PaymentObligationData>,
 }
 
 impl WalletView {
@@ -152,6 +171,7 @@ impl WalletView {
         active_multi_party_payjoins: Vec<BulletinBoardId>,
         current_timestep: TimeStep,
         wallet_id: WalletId,
+        payjoin_pending_pos: Vec<PaymentObligationData>,
     ) -> Self {
         Self {
             payment_obligations,
@@ -159,6 +179,7 @@ impl WalletView {
             new_multi_party_payjoins,
             current_timestep,
             wallet_id,
+            payjoin_pending_pos,
         }
     }
 }
@@ -238,6 +259,18 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
             ));
         }
         events.push(PredictedOutcome::PaymentObligationsHandled(outcomes));
+    }
+
+    if let Action::AbandonMultiPartyPayjoin(payment_obligation_id) = action {
+        // Abandoning is a unilateral spend of the blocked PO score it identically.
+        events.push(PredictedOutcome::PaymentObligationsHandled(vec![
+            get_payment_obligation_handled_outcome(
+                payment_obligation_id,
+                &sim,
+                wallet_view.current_timestep,
+                fee_paid_total,
+            ),
+        ]));
     }
 
     if matches!(action, Action::ConsolidateSelf(_)) {
@@ -371,24 +404,20 @@ impl Strategy for MultipartyPayjoinInitiatorStrategy {
         if state.payment_obligations.is_empty() {
             return vec![Action::Wait];
         }
-        // TODO: if the sesion is on going do not intiate a new one
-        // TODO: this is scaffolding for now, peers in the future will evaluate if they should initiate a multi-party payjoin given the number of payment obligations
+        // TODO: in the future non-zero wallets may also act as initiators
         if state.wallet_id != WalletId(0) {
             return vec![Action::Wait];
         }
-        let receivers = state
-            .payment_obligations
-            .iter()
-            .map(|po| po.to)
-            .collect::<HashSet<_>>();
-        if receivers.len() < 2 {
-            return vec![Action::Wait];
+
+        let mut actions = vec![];
+
+        // Abandon any pending payjoins whose POs are approaching their deadlines.
+        for po in state.payjoin_pending_pos.iter() {
+            actions.push(Action::AbandonMultiPartyPayjoin(po.id));
         }
 
         // TODO: only one multi-party payjoin session can be active at a time FOR NOW
-        let mut actions = vec![];
         if !state.active_multi_party_payjoins.is_empty() {
-            // If we have an active session we should actively participate in it
             debug_assert!(state.active_multi_party_payjoins.len() <= 1);
             for bulletin_board_id in state.active_multi_party_payjoins.iter() {
                 actions.push(Action::ContinueParticipateMultiPartyPayjoin(
@@ -398,9 +427,21 @@ impl Strategy for MultipartyPayjoinInitiatorStrategy {
             return actions;
         }
 
-        actions.push(Action::InitiateMultiPartyPayjoin(
-            state.payment_obligations.iter().map(|po| po.id).collect(),
-        ));
+        // Initiate a new session only when there are at least two distinct receivers.
+        let receivers = state
+            .payment_obligations
+            .iter()
+            .map(|po| po.to)
+            .collect::<HashSet<_>>();
+        if receivers.len() >= 2 {
+            actions.push(Action::InitiateMultiPartyPayjoin(
+                state.payment_obligations.iter().map(|po| po.id).collect(),
+            ));
+        }
+
+        if actions.is_empty() {
+            return vec![Action::Wait];
+        }
 
         actions
     }
@@ -442,6 +483,12 @@ impl Strategy for MultipartyPayjoinParticipantStrategy {
                 *bulletin_board_id,
             ));
         }
+
+        // Enumerate abandon candidates for POs in pending multi-party payjoins
+        for po in state.payjoin_pending_pos.iter() {
+            actions.push(Action::AbandonMultiPartyPayjoin(po.id));
+        }
+
         actions
     }
 
@@ -547,6 +594,7 @@ mod tests {
             vec![],
             TimeStep(0),
             WalletId(0),
+            vec![],
         )
     }
 
@@ -582,7 +630,7 @@ mod tests {
             from: WalletId(0),
             to: WalletId(1),
         };
-        let view = WalletView::new(vec![po], vec![], vec![], TimeStep(0), WalletId(0));
+        let view = WalletView::new(vec![po], vec![], vec![], TimeStep(0), WalletId(0), vec![]);
 
         let actions = strategy.enumerate_candidate_actions(&view);
 
@@ -743,7 +791,15 @@ mod tests {
             to: WalletId(2),
         };
 
-        let view = WalletView::new(vec![po], vec![], vec![], TimeStep(0), WalletId(1));
+        // Create view with wallet_id = 1 (not 0)
+        let view = WalletView::new(
+            vec![po],
+            vec![],
+            vec![],
+            TimeStep(0),
+            WalletId(1), // Wallet 1, not 0
+            vec![],
+        );
 
         let actions = strategy.enumerate_candidate_actions(&view);
 
@@ -771,6 +827,7 @@ mod tests {
             vec![],                                   // No active sessions yet
             TimeStep(0),
             WalletId(1),
+            vec![],
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -800,6 +857,7 @@ mod tests {
             vec![BulletinBoardId(0)], // Active session
             TimeStep(0),
             WalletId(1),
+            vec![],
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -823,13 +881,13 @@ mod tests {
             to: WalletId(1),
         };
 
-        // With both a new invitation and active session, strategy should continue active session.
         let view = WalletView::new(
             vec![po],
             vec![(BulletinBoardId(0), MessageId(0))],
             vec![BulletinBoardId(1)],
             TimeStep(0),
             WalletId(1),
+            vec![],
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -839,5 +897,145 @@ mod tests {
             actions[0],
             Action::ContinueParticipateMultiPartyPayjoin(BulletinBoardId(1))
         ));
+    }
+
+    // ── AbandonMultiPartyPayjoin ─────────────────────────────────────────────
+
+    /// Both initiator and participant strategies must emit
+    /// `AbandonMultiPartyPayjoin` for every PO that is stuck in a pending
+    /// payjoin session.
+    #[test]
+    fn test_strategies_enumerate_abandon_for_pending_pos() {
+        let po = PaymentObligationData {
+            id: PaymentObligationId(0),
+            deadline: TimeStep(3),
+            reveal_time: TimeStep(0),
+            amount: Amount::from_sat(1000),
+            from: WalletId(0),
+            to: WalletId(1),
+        };
+
+        // View with po_id in payjoin_pending_pos but no *new* invitations
+        let view = WalletView::new(
+            vec![po.clone()],
+            vec![],
+            vec![BulletinBoardId(0)], // active session keeps the PO stuck
+            TimeStep(0),
+            WalletId(0),
+            vec![po.clone()], // same PO is payjoin-pending
+        );
+
+        for strategy in [
+            &MultipartyPayjoinInitiatorStrategy as &dyn Strategy,
+            &MultipartyPayjoinParticipantStrategy,
+        ] {
+            let actions = strategy.enumerate_candidate_actions(&view);
+            assert!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, Action::AbandonMultiPartyPayjoin(_))),
+                "{:?} should enumerate AbandonMultiPartyPayjoin",
+                std::any::type_name_of_val(strategy)
+            );
+        }
+    }
+
+    /// `do_action(AbandonMultiPartyPayjoin)` must remove the payjoin session
+    /// then immediately broadcast the unilateral tx for the blocked obligation.
+    #[test]
+    fn test_do_action_abandon_broadcasts_unilateral_tx() {
+        use crate::{
+            bulletin_board::BulletinBoardId,
+            config::{ScorerConfig, WalletTypeConfig},
+            script_type::ScriptType,
+            transaction::{Input, TxData},
+            tx_contruction::{MultiPartyPayjoinSession, TxConstructionState},
+            SimulationBuilder,
+        };
+
+        let mut sim = SimulationBuilder::new(
+            42,
+            vec![WalletTypeConfig {
+                name: "test".to_string(),
+                count: 2,
+                strategies: vec!["UnilateralSpender".to_string()],
+                scorer: ScorerConfig {
+                    fee_savings_weight: 1.0,
+                    privacy_weight: 1.0,
+                    payment_obligation_weight: 1.0,
+                    coordination_weight: 0.0,
+                },
+                script_type: ScriptType::P2tr,
+            }],
+            100,
+            1,
+            1, // seed one payment obligation
+        )
+        .build();
+        sim.build_universe();
+
+        // Find a PO that wallet 0 is responsible for sending; skip if none.
+        let po_id = match WalletId(0)
+            .with(&sim)
+            .info()
+            .payment_obligations
+            .iter()
+            .next()
+        {
+            Some(&id) => id,
+            None => return,
+        };
+
+        // Pick a real confirmed UTXO from wallet 0
+        let outpoint = WalletId(0)
+            .with(&sim)
+            .info()
+            .confirmed_utxos
+            .iter()
+            .next()
+            .cloned()
+            .expect("wallet should have UTXOs after build_universe");
+
+        let bb_id = BulletinBoardId(0);
+        let mut tx = TxData::default();
+        tx.inputs = vec![Input { outpoint }];
+
+        // Inject a payjoin session containing the PO
+        WalletId(0)
+            .with_mut(&mut sim)
+            .info_mut()
+            .active_multi_party_payjoins
+            .insert(
+                bb_id,
+                MultiPartyPayjoinSession {
+                    payment_obligation_ids: vec![po_id],
+                    tx_template: tx,
+                    state: TxConstructionState::SentInputs,
+                },
+            );
+
+        let txs_before = WalletId(0).with(&sim).info().broadcast_transactions.len();
+
+        // Execute the action through the standard dispatch path
+        WalletId(0)
+            .with_mut(&mut sim)
+            .do_action(&Action::AbandonMultiPartyPayjoin(po_id));
+
+        // The session is removed
+        assert!(
+            WalletId(0)
+                .with(&sim)
+                .info()
+                .active_multi_party_payjoins
+                .is_empty(),
+            "session must be gone after AbandonMultiPartyPayjoin"
+        );
+
+        // A new tx was broadcast (the unilateral spend)
+        let txs_after = WalletId(0).with(&sim).info().broadcast_transactions.len();
+        assert!(
+            txs_after > txs_before,
+            "AbandonMultiPartyPayjoin must broadcast a unilateral tx"
+        );
     }
 }

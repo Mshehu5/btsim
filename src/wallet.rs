@@ -159,7 +159,7 @@ impl<'a> WalletHandleMut<'a> {
         &mut self.sim.wallet_data[self.id.0]
     }
 
-    fn info_mut(&mut self) -> &mut WalletInfo {
+    pub(crate) fn info_mut(&mut self) -> &mut WalletInfo {
         let last_wallet_info_id = self.data().last_wallet_info_id;
         &mut self.sim.wallet_info[last_wallet_info_id.0]
     }
@@ -244,6 +244,25 @@ impl<'a> WalletHandleMut<'a> {
         tx
     }
 
+    // Fallback path: drop the payjoin session so the PO can be broadcast unilaterally.
+    // The caller is responsible for following up with handle_payment_obligations.
+    fn abandon_multi_party_payjoin(&mut self, payment_obligation_id: &PaymentObligationId) {
+        let mp_bb_id = self
+            .info()
+            .active_multi_party_payjoins
+            .iter()
+            .find(|(_, session)| {
+                session
+                    .payment_obligation_ids
+                    .contains(payment_obligation_id)
+            })
+            .map(|(bb_id, _)| *bb_id);
+
+        if let Some(bb_id) = mp_bb_id {
+            self.info_mut().active_multi_party_payjoins.remove(&bb_id);
+        }
+    }
+
     fn create_multi_party_payjoin_session(&mut self, po_ids: &[PaymentObligationId]) {
         if self.id.0 != 0 {
             return; // TODO For now the first wallet is the leader
@@ -261,9 +280,10 @@ impl<'a> WalletHandleMut<'a> {
         }
         let change_addr = self.new_address();
         let tx_template = self.construct_transaction_template(po_ids, &change_addr);
-        let session = SentBulletinBoardId::new(self.sim, bulletin_board_id, tx_template.clone());
 
-        session.send_inputs();
+        let sent = SentBulletinBoardId::new(self.sim, bulletin_board_id, tx_template.clone());
+
+        sent.send_inputs();
         info!("Sent inputs for multi party payjoin session");
 
         let session = MultiPartyPayjoinSession {
@@ -410,12 +430,32 @@ impl<'a> WalletHandleMut<'a> {
             .filter(|po| po.with(self.sim).data().reveal_time <= self.sim.current_timestep)
             .map(|po| po.with(self.sim).data().clone())
             .collect::<Vec<_>>();
+
+        // POs currently in pending payjoins candidates for AbandonPayjoin
+        let multi_party_po_ids: OrdSet<PaymentObligationId> = wallet_info
+            .active_multi_party_payjoins
+            .values()
+            .flat_map(|session| session.payment_obligation_ids.iter().cloned())
+            .collect();
+
+        let payjoin_pending_pos = wallet_info
+            .payment_obligations
+            .iter()
+            .filter(|po_id| {
+                !wallet_info.handled_payment_obligations.contains(po_id)
+                    && multi_party_po_ids.contains(po_id)
+            })
+            .filter(|po| po.with(self.sim).data().reveal_time <= self.sim.current_timestep)
+            .map(|po| po.with(self.sim).data().clone())
+            .collect::<Vec<_>>();
+
         WalletView::new(
             payment_obligations,
             new_multi_party_payjoins,
             active_mp_pj_sessions,
             self.sim.current_timestep,
             self.id,
+            payjoin_pending_pos,
         )
     }
 
@@ -458,6 +498,10 @@ impl<'a> WalletHandleMut<'a> {
             }
             Action::ContinueParticipateMultiPartyPayjoin(bulletin_board_id) => {
                 self.participate_in_multi_party_payjoin(bulletin_board_id);
+            }
+            Action::AbandonMultiPartyPayjoin(po_id) => {
+                self.abandon_multi_party_payjoin(po_id);
+                self.handle_payment_obligations(&[*po_id]);
             }
         }
     }
@@ -648,4 +692,10 @@ impl<'a> AddressHandle<'a> {
     pub(crate) fn wallet(&self) -> WalletHandle<'a> {
         self.data().wallet_id.with(self.sim)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)]
+    use super::*;
 }
