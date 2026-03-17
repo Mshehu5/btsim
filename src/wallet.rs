@@ -94,8 +94,7 @@ impl<'a> WalletHandle<'a> {
 
         let candidates: Vec<Candidate> = utxos
             .iter()
-            .enumerate()
-            .map(|(_, o)| Candidate {
+            .map(|o| Candidate {
                 value: o.data().amount.to_sat(),
                 weight: o.address().data().script_type.input_weight_wu(),
                 input_count: 1,
@@ -125,16 +124,13 @@ impl<'a> WalletHandle<'a> {
             change_policy,
         };
 
-        match coin_selector.run_bnb(metric, 100_000) {
-            Err(err) => {
-                // TODO: should be a error log
-                warn!("BNB failed to find a solution: {}", err);
+        if let Err(err) = coin_selector.run_bnb(metric, 100_000) {
+            // TODO: should be a error log
+            warn!("BNB failed to find a solution: {}", err);
 
-                coin_selector
-                    .select_until_target_met(target)
-                    .expect("coin selection should always succeed since payments consider budger lower bound");
-            }
-            Ok(_) => (),
+            coin_selector.select_until_target_met(target).expect(
+                "coin selection should always succeed since payments consider budger lower bound",
+            );
         };
 
         let selection = coin_selector
@@ -174,16 +170,16 @@ impl<'a> WalletHandle<'a> {
 }
 
 impl<'a> WalletHandleMut<'a> {
-    pub(crate) fn data_mut<'b>(&'b mut self) -> &'b mut WalletData {
+    pub(crate) fn data_mut(&mut self) -> &mut WalletData {
         &mut self.sim.wallet_data[self.id.0]
     }
 
-    fn info_mut<'b>(&'b mut self) -> &'b mut WalletInfo {
+    fn info_mut(&mut self) -> &mut WalletInfo {
         let last_wallet_info_id = self.data().last_wallet_info_id;
         &mut self.sim.wallet_info[last_wallet_info_id.0]
     }
 
-    pub(crate) fn handle(&self) -> WalletHandle {
+    pub(crate) fn handle(&self) -> WalletHandle<'_> {
         WalletHandle {
             sim: self.sim,
             id: self.data().id,
@@ -306,7 +302,7 @@ impl<'a> WalletHandleMut<'a> {
     ) -> BulletinBoardId {
         let payment_obligation_data = payment_obligation.with(self.sim).data().clone();
         let change_addr = self.new_address();
-        let mut tx_template =
+        let tx_template =
             self.construct_transaction_template(&[payment_obligation_data.id], &change_addr);
         let payjoin_proposal = PayjoinProposal {
             tx: tx_template,
@@ -330,7 +326,7 @@ impl<'a> WalletHandleMut<'a> {
         bulletin_board_id
     }
 
-    fn create_multi_party_payjoin_session(&mut self, po_ids: &Vec<PaymentObligationId>) {
+    fn create_multi_party_payjoin_session(&mut self, po_ids: &[PaymentObligationId]) {
         if self.id.0 != 0 {
             return; // TODO For now the first wallet is the leader
         }
@@ -338,7 +334,7 @@ impl<'a> WalletHandleMut<'a> {
         let bulletin_board_id = self.sim.create_bulletin_board();
         // Then we invite all members to join
         for po_id in po_ids.iter() {
-            let recv = po_id.with(&self.sim).data().to;
+            let recv = po_id.with(self.sim).data().to;
             self.sim.broadcast_message(
                 recv,
                 self.id,
@@ -353,7 +349,7 @@ impl<'a> WalletHandleMut<'a> {
         info!("Sent inputs for multi party payjoin session");
 
         let session = MultiPartyPayjoinSession {
-            payment_obligation_ids: po_ids.clone(),
+            payment_obligation_ids: po_ids.to_owned(),
             tx_template,
             state: TxConstructionState::SentInputs,
         };
@@ -392,12 +388,11 @@ impl<'a> WalletHandleMut<'a> {
                     "Sent inputs for multi party payjoin session with bulletin board id: {:?}",
                     bulletin_board_id
                 );
-                return;
             }
             TxConstructionState::SentInputs => {
                 let t = SentInputs::new(self.sim, *bulletin_board_id, session.tx_template.clone());
                 let res = t.have_enough_inputs();
-                if let Some(_) = res {
+                if res.is_some() {
                     let mut updated_session = session.clone();
                     updated_session.state = TxConstructionState::SentOutputs;
                     self.info_mut()
@@ -408,12 +403,11 @@ impl<'a> WalletHandleMut<'a> {
                         bulletin_board_id
                     );
                 }
-                return;
             }
             TxConstructionState::SentOutputs => {
                 let t = SentOutputs::new(self.sim, *bulletin_board_id, session.tx_template.clone());
                 let res = t.have_enough_outputs();
-                if let Some(_) = res {
+                if res.is_some() {
                     let mut updated_session = session.clone();
                     updated_session.state = TxConstructionState::SentReadyToSign;
                     self.info_mut()
@@ -424,7 +418,6 @@ impl<'a> WalletHandleMut<'a> {
                         bulletin_board_id
                     );
                 }
-                return;
             }
             TxConstructionState::SentReadyToSign => {
                 let t = SentReadyToSign::new(self.sim, *bulletin_board_id);
@@ -452,11 +445,9 @@ impl<'a> WalletHandleMut<'a> {
                         bulletin_board_id
                     );
                 }
-                return;
             }
             TxConstructionState::Success(tx_id) => {
                 log::info!("Multi party payjoin session successful: {:?}", tx_id);
-                return;
             }
         }
     }
@@ -487,11 +478,8 @@ impl<'a> WalletHandleMut<'a> {
                             }
                             _ => None,
                         });
-                    if let Some(payjoin_proposal) = payjoin_proposal {
-                        Some((message.id, *bulletin_board_id, payjoin_proposal.clone()))
-                    } else {
-                        None
-                    }
+                    payjoin_proposal
+                        .map(|proposal| (message.id, *bulletin_board_id, proposal.clone()))
                 }
                 _ => None,
             })
@@ -562,7 +550,7 @@ impl<'a> WalletHandleMut<'a> {
             Action::InitiatePayjoin(po) => {
                 let bulletin_board_id = self.create_payjoin(po);
                 self.sim.broadcast_message(
-                    po.with(&self.sim).data().to,
+                    po.with(self.sim).data().to,
                     self.id,
                     MessageType::InitiatePayjoin(bulletin_board_id),
                 );
@@ -625,8 +613,7 @@ impl<'a> WalletHandleMut<'a> {
 
     fn handle_payment_obligations(&'a mut self, payment_obligation_ids: &[PaymentObligationId]) {
         let change_addr = self.new_address();
-        let mut tx_template =
-            self.construct_transaction_template(payment_obligation_ids, &change_addr);
+        let tx_template = self.construct_transaction_template(payment_obligation_ids, &change_addr);
         let tx_id = self.spend_tx(tx_template);
         self.info_mut()
             .txid_to_payment_obligation_ids
@@ -647,7 +634,7 @@ impl<'a> WalletHandleMut<'a> {
         spend
     }
 
-    pub(crate) fn new_tx<F>(&mut self, build: F) -> TxHandle
+    pub(crate) fn new_tx<F>(&mut self, build: F) -> TxHandle<'_>
     where
         F: FnOnce(&mut TxData, &Simulation),
     {
